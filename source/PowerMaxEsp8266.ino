@@ -596,7 +596,7 @@ void handleNewTelnetClients()
     else
     {
       telnetClient = telnetServer.available();
-      LOG("Connected to %s, type '?' for help.\r\n", WIFI_SSID); 
+      //LOG("Connected to %s, type '?' for help.\r\n", WIFI_SSID); 
       
     }
   }
