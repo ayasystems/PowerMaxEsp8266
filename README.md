@@ -5,6 +5,10 @@ Thank to irekzielinski to make the library -> https://github.com/irekzielinski/P
 
 This sketch provide mqtt comunication to Visonic PowerMax Alarms
 
+Added WifiManager to setup wifi and mqtt connection
+
+Into folder libraries you can find the used libraries to compile
+
 ## OUTPUT TOPICS
 # powermax/stat
 Send info about alarm status (sending info each minute)
