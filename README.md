@@ -17,7 +17,7 @@ Example
 Send info about alarm status (sending info each minute)
 * {"flags":"39","flags_ready":true,"flags_alertInMemory":true,"flags_trouble":true,"flags_bypasOn":false,"flags_last10sec":false,"flags_zoneEvent":true,"flags_armDisarmEvent":false,"flags_alarmEvent":false}
 
-*{"flags":"69","flags_ready":true,"flags_alertInMemory":false,"flags_trouble":true,"flags_bypasOn":false,"flags_last10sec":false,"flags_zoneEvent":false,"flags_armDisarmEvent":true,"flags_alarmEvent":false}
+* {"flags":"69","flags_ready":true,"flags_alertInMemory":false,"flags_trouble":true,"flags_bypasOn":false,"flags_last10sec":false,"flags_zoneEvent":false,"flags_armDisarmEvent":true,"flags_alarmEvent":false}
 
 # powermax/zone
 Send one topic for each sensor (sending info each minute or when event occurs)
