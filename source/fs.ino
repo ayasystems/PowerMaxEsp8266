@@ -4,10 +4,12 @@
 
 void wifiManagerSetup(){
     //Local intialization. Once its business is done, there is no need to keep it around
+//Set hostname
+  WiFi.hostname("powermaxEsp"); 
   WiFiManager wifiManager;
   //reset saved settings
   //wifiManager.resetSettings();
-  
+  wifiManager.setDebugOutput(false);
   WiFiManagerParameter custom_mqtt_server("mqtt_server", "mqtt_server", mqtt_server, 40);
   WiFiManagerParameter custom_mqtt_port("mqtt_port", "mqtt_port", mqtt_port, 6);
   WiFiManagerParameter custom_mqtt_user("mqtt_user", "mqtt_user", mqtt_user, 40); 
@@ -55,9 +57,9 @@ void wifiManagerSetup(){
   }
   */
 wifiManager.autoConnect();
-
+  WiFi.hostname("powermaxEsp"); 
   //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
+  //Serial.println("connected...yeey :)");
   server.reset(new ESP8266WebServer(WiFi.localIP(), 80));
   //read updated parameters
   strcpy(mqtt_server, custom_mqtt_server.getValue());
@@ -68,7 +70,7 @@ wifiManager.autoConnect();
 
   //save the custom parameters to FS
   if (shouldSaveConfig) {
-    Serial.println("saving config");
+    //Serial.println("saving config");
     //DynamicJsonBuffer jsonBuffer;
     DynamicJsonDocument  json(1024);
     //JsonObject& json = jsonBuffer.createObject();
@@ -81,7 +83,8 @@ wifiManager.autoConnect();
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
-      Serial.println("failed to open config file for writing");
+      //Serial.println("failed to open config file for writing");
+      addLog("Failed to open config FS for writing");
     }
 
     //json.printTo(Serial);
@@ -93,21 +96,22 @@ wifiManager.autoConnect();
     configFile.close();
     //end save
   }
-
-  Serial.println("local ip");
-  Serial.println(WiFi.localIP());
+WiFi.mode(WIFI_STA); // Force to station mode because if device was switched off while in access point mode it will start up next time in access point mode.
+    
+  //Serial.println("local ip");
+  //Serial.println(WiFi.localIP());
     
 }
 
 void createFS(){
     if (SPIFFS.begin()) {
-        Serial.println("mounted file system");
+        //Serial.println("mounted file system");
         if (SPIFFS.exists("/config.json")) {
           //file exists, reading and loading
-          Serial.println("reading config file");
+          //Serial.println("reading config file");
           File configFile = SPIFFS.open("/config.json", "r");
           if (configFile) {
-            Serial.println("opened config file");
+            //Serial.println("opened config file");
             size_t size = configFile.size();
             // Allocate a buffer to store contents of the file.
             std::unique_ptr<char[]> buf(new char[size]);
@@ -144,7 +148,7 @@ void createFS(){
           }
         }
       } else {
-        Serial.println("Fail to mount FS");        
+        //Serial.println("Fail to mount FS");        
         addLog("failed to mount FS");
       }
       //end read
