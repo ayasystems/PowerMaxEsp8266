@@ -12,6 +12,9 @@ Added WifiManager to setup wifi and mqtt connection
 
 Into folder libraries you can find the used libraries to compile
 
+
+## POWERMAX PINOUT
+![Web](https://github.com/ayasystems/PowerMaxEsp8266/raw/master/powermax_pinout.JPG)
 ## OUTPUT TOPICS
 # powermax/stat
 Send info about alarm status (sending info each minute)
