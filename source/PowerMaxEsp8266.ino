@@ -3,10 +3,12 @@
 #include <pmax.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
+#include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
+ 
 #include <ArduinoOTA.h>
- #include <WiFiManager.h> 
+#include <WiFiManager.h> 
 //#include <SoftwareSerial.h>
 //#define MQTT_MAX_PACKET_SIZE 512 //need to change in PubSubClient.h library
 #include <PubSubClient.h>
@@ -14,6 +16,13 @@
 //////////////////// IMPORTANT DEFINES, ADJUST TO YOUR NEEDS //////////////////////
 //ESP8266WebServer server(80);
 std::unique_ptr<ESP8266WebServer> server;
+ 
+//ntp
+WiFiUDP ntpUDP;
+const int mqttMaxPacketSize = 340;
+long  utcAdjust = 1 ;//set local time (Europe/Madrid 1) 
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", (utcAdjust*3600), 60000);
+
 
 //Telnet allows to see debug logs via network, it allso allows CONTROL of the system if PM_ALLOW_CONTROL is defined
 #define PM_ENABLE_TELNET_ACCESS
@@ -58,6 +67,7 @@ char mqtt_client[40] = "EspPowerMax";
 struct LogStruct
 {
   unsigned long timeStamp;
+  String formatedTime;
   String Message;
 } Logging[21];
 //#define DEBUG_SERIAL true
@@ -78,6 +88,8 @@ void addLog(const char *line)
     logcount++;
     if (logcount > 20)
       logcount = 0;
+      
+    Logging[logcount].formatedTime = timeClient.getFormattedTime();  
     Logging[logcount].timeStamp = millis();
     Logging[logcount].Message = line;
  
@@ -89,6 +101,7 @@ void addLog(byte loglevel, const char *line)
     logcount++;
     if (logcount > 20)
       logcount = 0;
+    Logging[logcount].formatedTime = timeClient.getFormattedTime();    
     Logging[logcount].timeStamp = millis();
     Logging[logcount].Message = line;
  
@@ -116,23 +129,29 @@ public:
         {
         case 0x51: //"Arm Home" 
             addLog("Event Alarm: Arm Home");
+            publishAlarmFlags();publishAlarmStat();
             break;
         case 0x53: //"Quick Arm Home"
             addLog("Event Alarm: Quick Arm Home");
+            publishAlarmFlags();publishAlarmStat();
             break;
 
         case 0x52: //"Arm Away"
             addLog("Event Alarm: Arm Away");
+            publishAlarmFlags();publishAlarmStat();
             break;
         case 0x54: //"Quick Arm Away"
             addLog("Event Alarm: Quick Arm Away");
+            publishAlarmFlags();publishAlarmStat();
             break;
 
         case 0x55: //"Disarm"
             addLog("Event Alarm: Disarm");
+            publishAlarmFlags();publishAlarmStat();
             break;
         default: //"Disarm"
             addLog("Default case");
+            publishAlarmFlags();publishAlarmStat();
             break;
         }        
     }
@@ -257,10 +276,18 @@ void handleArmHome() {
   
   server->send(200, "text/html", reply);
 }
+void handleUpload(){
+
+//  httpUpdater.setup(&server);
+  
+}
 void handleRoot() {
   unsigned long days = 0, hours = 0, minutes = 0;
   unsigned long val = os_getCurrentTimeSec();
-  
+
+    SystemStatus stat = pm.getStat();
+    String alarmStatus = pm.GetStrPmaxSystemStatus(stat);  
+    
   days = val / (3600*24);
   val -= days * (3600*24);
   
@@ -283,10 +310,14 @@ void handleRoot() {
    * 
    */
   int enrolledZones = pm.getEnrolledZoneCnt();
-  sprintf(szTmp, "Hello from esp powermax gateway.<br>Uptime: %02d:%02d:%02d.%02d<br>free heap: %u<br>Enrolled Zones: %03d<br>Mqtt Server: %s<br>Mqtt Port: %s<br>Mqtt User: %s<br>Mqtt Pass: *********<br>Mqtt ClientId: %s ",
+  reply+="<h1 id=\"rcorners1\">"+alarmStatus+"</h1>";
+  sprintf(szTmp, "<br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s ",
                   (int)days, (int)hours, (int)minutes, (int)val, ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
   reply+=szTmp;
-  sprintf(szTmp,"<br>MQTT_MAX_PACKET_SIZE: %02d (Need more of 256)",(int)clientMqtt.getBufferSize());
+  sprintf(szTmp,"<br><b>ESP SDK:</b> %s",ESP.getSdkVersion());
+  reply+=szTmp;
+  reply+="<br><b>ESP Core:</b> "+ESP.getCoreVersion();
+  sprintf(szTmp,"<br><b>MQTT_MAX_PACKET_SIZE:</b> %02d (Need more of 256)",(int)clientMqtt.getBufferSize()); 
   reply+=szTmp;
   reply+="</html>";
   
@@ -302,7 +333,7 @@ void handleLog() {
   addHeader(true, reply);
   reply += F("<script language='JavaScript'>function RefreshMe(){window.location = window.location}setTimeout('RefreshMe()', 5000);</script>");
   reply += F("<div class=\"table-responsive\"><table id=\"log\" class=\"table curTx table-condensed table-striped table-hover\">");
-  reply += F("<thead><tr><th>Time</th><th>entrie</th></tr></thead><tbody>");
+  reply += F("<thead><tr><th>Time</th><th>Entrie</th></tr></thead><tbody>");
 
   if (logcount != -1)
   {
@@ -315,7 +346,7 @@ void handleLog() {
       if (Logging[counter].timeStamp > 0)
       {
         reply += "<tr><td>";
-        reply += Logging[counter].timeStamp;
+        reply += Logging[counter].formatedTime;
         reply += "</td><td>";
         reply += Logging[counter].Message;
         reply += F("</td></tr>");
@@ -347,6 +378,10 @@ void addHeader(boolean showMenu, String& str)
     str += F(".div_l {float: left;}");
     str += F(".div_r {float: right; margin: 2px; padding: 1px 10px; border-radius: 7px; background-color:#080; color:white;}");
     str += F(".div_br {clear: both;}");
+
+    str += F("#rcorners1 { background: #dbeac4ad; display:inline-block;  border-radius: 25px; padding: 20px;  }");
+
+    
     str += F("</style>");
    str += F("<meta charset=\"utf-8\">");
    str += F("<script src=\"https://ajax.googleapis.com/ajax/libs/jquery/1.12.3/jquery.min.js\"></script>");
@@ -357,7 +392,7 @@ void addHeader(boolean showMenu, String& str)
    str += F("<script type=\"text/javascript\" src=\"https://cdn.datatables.net/1.10.12/js/jquery.dataTables.min.js\"></script>");
         
     str += F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-  str += F("</head>");
+  str += F("</head><html style=\"padding-top: 10px;padding-left: 10px\">");
   if (showMenu)
   {
     //str += F("<BR><a class=\"button-menu\" href=\".\">Main</a>");
@@ -365,6 +400,7 @@ void addHeader(boolean showMenu, String& str)
     //str += F("<a class=\"button-menu\" href=\"hardware\">Hardware</a>");
     //str += F("<a class=\"button-menu\" href=\"devices\">Devices</a>");
     //str += F("<a class=\"button-menu\" href=\"log\">Log</a>");
+    //str += F("<a class=\"button-menu\" href=\"update\">Update</a><BR><BR>");
     //str += F("<a class=\"button-menu\" href=\"reboot\">Reboot</a><BR><BR>");
     str += F("<button onclick=\"window.location.href='./'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-folder-open\" aria-hidden=\"true\"></span>&nbsp;Main</button>");
     str += F("<button onclick=\"window.location.href='./status'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Status</button>");
@@ -372,12 +408,20 @@ void addHeader(boolean showMenu, String& str)
 
 
 
+
+
+    
+    str += F("<button onclick=\"window.location.href='./reboot'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-repeat\" aria-hidden=\"true\"></span>&nbsp;Reboot</button>");  
+
+    str += "<BR><BR>";
+
     str += F("<button onclick=\"window.location.href='./armaway'\"  type=\"button\" class=\"btn btn-danger navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;ARM Away</button>");
     str += F("<button onclick=\"window.location.href='./armhome'\"  type=\"button\" class=\"btn btn-warning navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;ARM Home</button>");
     str += F("<button onclick=\"window.location.href='./disarm'\"  type=\"button\" class=\"btn btn-success navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;DISARM</button>");
 
+
+    str += "<BR><BR>";
     
-    str += F("<button onclick=\"window.location.href='./reboot'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-repeat\" aria-hidden=\"true\"></span>&nbsp;Reboot</button><BR><BR>");  
   }  
   
 }
@@ -522,7 +566,7 @@ void setup(void){
  
  
 connectMqtt();
-
+  timeClient.begin();
     // Optionnal functionnalities of EspMQTTClient : 
 //#ifdef DEBUG_SERIAL
 //  clientMqtt.enableDebuggingMessages(); // Enable debugging messages sent to serial output
@@ -864,6 +908,7 @@ void loop(void){
   handleTelnetRequests(&pm);
 #endif  
       loopMQTT();
+      timeClient.update();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
