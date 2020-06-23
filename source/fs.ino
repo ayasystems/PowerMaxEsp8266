@@ -61,6 +61,8 @@ wifiManager.autoConnect();
   //if you get here you have connected to the WiFi
   //Serial.println("connected...yeey :)");
   server.reset(new ESP8266WebServer(WiFi.localIP(), 80));
+ 
+  //httpServer.begin();  
   //read updated parameters
   strcpy(mqtt_server, custom_mqtt_server.getValue());
   strcpy(mqtt_port, custom_mqtt_port.getValue());
@@ -142,7 +144,7 @@ void createFS(){
               addLog(jsonLog);
 
             } else {
-              addLog(1,"failed to load json config");
+              addLog("failed to load json config");
             }
             configFile.close();
           }
