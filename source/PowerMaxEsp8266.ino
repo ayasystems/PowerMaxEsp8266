@@ -19,7 +19,7 @@ std::unique_ptr<ESP8266WebServer> server;
  
 //ntp
 WiFiUDP ntpUDP;
-const int mqttMaxPacketSize = 340;
+const int mqttMaxPacketSize = 512;
 long  utcAdjust = 1 ;//set local time (Europe/Madrid 1) 
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", (utcAdjust*3600), 60000);
 
