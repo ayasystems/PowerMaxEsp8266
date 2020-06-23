@@ -40,7 +40,7 @@ void callbackMqtt(char* topic, byte* payload, unsigned int length) {
 void connectMqtt(){
  
     clientMqtt.setServer(mqtt_server, atoi(mqtt_port));
-    clientMqtt.setBufferSize(512);
+    clientMqtt.setBufferSize(mqttMaxPacketSize);
     clientMqtt.connect(mqtt_client, mqtt_user, mqtt_pass);
     clientMqtt.subscribe("powermax/command"); 
     clientMqtt.setCallback(callbackMqtt);
@@ -48,7 +48,7 @@ void connectMqtt(){
 
 void publishAlarmStat(){
 
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<mqttMaxPacketSize> doc;
     SystemStatus stat = pm.getStat();
     int panelType     = pm.getPanelType();
     int modelType     = pm.getModelType();
@@ -76,7 +76,7 @@ void publishAlarmStat(){
 
 void publishAlarmFlags(){
 
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<mqttMaxPacketSize> doc;
  
       //  outputStream->writeJsonTag("flags", flags);
     unsigned char flags = pm.getAlarmFlags();
@@ -118,33 +118,7 @@ void publishAlarmZones(){
                 //sprintf(zoneId, "%d", ix);
                 //outputStream->write(zoneId);
             }
-
-/*
-     outputStream->write("{");
-    {
-        outputStream->writeJsonTag("zoneName", name);
-        outputStream->writeJsonTag("zoneType", zoneType);
-        outputStream->writeJsonTag("zoneTypeStr", zoneTypeStr);
-        outputStream->writeJsonTag("sensorId", sensorId);
-        outputStream->writeJsonTag("sensorType", sensorType);
-        outputStream->writeJsonTag("sensorMake", sensorMake);
-        outputStream->writeJsonTag("signalStrength", (int)signalStrength);
-        
-        if(lastEventTime > 0)
-        {
-            outputStream->writeJsonTag("lastEvent", lastEvent);
-            outputStream->writeJsonTag("lastEventAge", (int)(os_getCurrentTimeSec()-lastEventTime));
-        }
-
-        outputStream->writeJsonTag("stat_doorOpen", stat.doorOpen);
-        outputStream->writeJsonTag("stat_bypased", stat.bypased);
-        outputStream->writeJsonTag("stat_lowBattery", stat.lowBattery);
-        outputStream->writeJsonTag("stat_active", stat.active);
-        outputStream->writeJsonTag("stat_tamper", stat.tamper, false);
-    }
-    outputStream->write("}");
-*/
-    
+ 
   
   }  
 
@@ -154,14 +128,15 @@ void publishAlarmZone(unsigned char ix){
 }
 void publishAlarmZone(int ix){
                  // int alarmTrippedZone;
-                  Zone alarmZone;                
+                  Zone alarmZone;   
+                  unsigned long  currentTime = os_getCurrentTimeSec();             
                  //  int enrolledZones = pm.getEnrolledZoneCnt();
                   alarmZone = pm.getAlarmZone(ix);
                
                   //addLog("ix: "+(String)ix+" SensorId: "+(String)alarmZone.sensorId+" tripped: "+(String)alarmTrippedZone+" Enroled: "+(String)alarmZone.enrolled);
                   if(alarmZone.enrolled){
                    
-                      StaticJsonDocument<MQTT_MAX_PACKET_SIZE> doc;
+                      StaticJsonDocument<mqttMaxPacketSize> doc;
                       doc["zoneId"]              = ix; 
                       doc["zoneName"]            = alarmZone.name;
                       doc["zoneType"]            = alarmZone.zoneType;
@@ -171,9 +146,10 @@ void publishAlarmZone(int ix){
                       doc["sensorMake"]          = alarmZone.sensorMake;
                       doc["enrolled"]            = alarmZone.enrolled;
                       doc["signalStrength"]      = alarmZone.signalStrength;
-                      doc["lastEvent"]           = alarmZone.lastEvent;
+                      doc["lastEvent"]           = (int)alarmZone.lastEvent;
+                      doc["lastEventStr"]        = pm.GetStrPmaxZoneEventTypes(alarmZone.lastEvent);
                       doc["lastEventTime"]       = alarmZone.lastEventTime;
- 
+                      doc["lastEventTimeAgo"]    = currentTime-alarmZone.lastEventTime;
                       doc["stat_doorOpen"]       = alarmZone.stat.doorOpen;
                       doc["stat_bypased"]        = alarmZone.stat.bypased;
                       doc["stat_lowBattery"]     = alarmZone.stat.lowBattery;
@@ -181,30 +157,30 @@ void publishAlarmZone(int ix){
                       doc["stat_tamper"]         = alarmZone.stat.tamper;
                       String output;
                       serializeJson(doc, output);
-                      
+               
                       if(!clientMqtt.publish("powermax/zone", output.c_str())){
                         addLog( "ERROR -> Publish powermax/zone " ); 
                         addLog(output);
                       }
-
+             
                  }  
 }
   
 void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr){
   String output;  
-  StaticJsonDocument<MQTT_MAX_PACKET_SIZE> doc;
+  StaticJsonDocument<mqttMaxPacketSize> doc;
   doc["event"]               = "DISARMED";
   doc["whoDisarmed"]         = whoDisarmed;
   doc["whoDisarmedStr"]         = whoDisarmedStr;
   serializeJson(doc, output);
   if(!clientMqtt.publish("powermax/system", output.c_str())){
-    addLog( "ERROR -> Publish powermax/zone " ); 
+    addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
 }
 void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned char armType, const char* armTypeStr){
   String output;  
-  StaticJsonDocument<MQTT_MAX_PACKET_SIZE> doc;
+  StaticJsonDocument<mqttMaxPacketSize> doc;
   doc["event"]               = "ARMED";
   doc["whoArmed"]            = whoArmed;
   doc["whoArmedStr"]         = whoArmedStr;
@@ -212,14 +188,14 @@ void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned
   doc["armTypeStr"]          = armTypeStr;
   serializeJson(doc, output);
   if(!clientMqtt.publish("powermax/system", output.c_str())){
-    addLog( "ERROR -> Publish powermax/zone " ); 
+    addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
 }
 
 void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsigned char zoneTripped, const char* zoneTrippedStr){
   String output;  
-  StaticJsonDocument<MQTT_MAX_PACKET_SIZE> doc;
+  StaticJsonDocument<mqttMaxPacketSize> doc;
   doc["event"]              = "ALARMSTARTED";
   doc["alarmType"]          = alarmType;
   doc["alarmTypeStr"]       = alarmTypeStr;
@@ -227,7 +203,7 @@ void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsi
   doc["zoneTrippedStr"]     = zoneTrippedStr;
   serializeJson(doc, output);
   if(!clientMqtt.publish("powermax/system", output.c_str())){
-    addLog( "ERROR -> Publish powermax/zone " ); 
+    addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   } 
 
@@ -235,13 +211,13 @@ void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsi
 
 void publishAlarmCancelled(unsigned char whoDisarmed, const char* whoDisarmedStr){
   String output;  
-  StaticJsonDocument<MQTT_MAX_PACKET_SIZE> doc;
+  StaticJsonDocument<mqttMaxPacketSize> doc;
   doc["event"]               = "ALARMCANCELLED";
   doc["whoDisarmed"]         = whoDisarmed;
   doc["whoDisarmedStr"]         = whoDisarmedStr;
   serializeJson(doc, output);
   if(!clientMqtt.publish("powermax/system", output.c_str())){
-    addLog( "ERROR -> Publish powermax/zone " ); 
+    addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
 }
