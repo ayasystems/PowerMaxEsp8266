@@ -93,7 +93,7 @@ wifiManager.autoConnect();
     //json.printTo(configFile);
     char jsonLog[1024];
     serializeJson(json, jsonLog);
-    addLog(jsonLog);
+    addLog("SAVE: "+String(jsonLog));
     serializeJson(json, configFile);
     configFile.close();
     //end save
@@ -141,7 +141,7 @@ void createFS(){
               
               char jsonLog[1024];
               serializeJson(json, jsonLog);
-              addLog(jsonLog);
+              addLog("LOAD: "+String(jsonLog));
 
             } else {
               addLog("failed to load json config");
