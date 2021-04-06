@@ -1104,9 +1104,9 @@ void loopMQTT(){
     if(currentMillis - prevMqtt > intervalMqtt and clientMqtt.connected()) {
    
      prevMqtt = currentMillis;   
-     //publishAlarmStat();     
-     //publishAlarmFlags();  
-     //publishAlarmZones();
+     publishAlarmStat();     
+     publishAlarmFlags();  
+     publishAlarmZones();
       if (timeClient.update()){
        
          unsigned long epoch = timeClient.getEpochTime();
