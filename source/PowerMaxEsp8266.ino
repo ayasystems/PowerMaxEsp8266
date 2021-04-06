@@ -1,4 +1,4 @@
-#include <FS.h>   
+#include <FS.h>  
 #include <DNSServer.h>
 #include <pmax.h>
 #include <ESP8266WiFi.h>
@@ -6,9 +6,11 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
- 
 #include <ArduinoOTA.h>
 #include <WiFiManager.h> 
+#include <TimeLib.h>
+#include <time.h>
+#include <Timezone.h>    // https://github.com/JChristensen/Timezone
 //#include <SoftwareSerial.h>
 //#define MQTT_MAX_PACKET_SIZE 512 //need to change in PubSubClient.h library
 #include <PubSubClient.h>
@@ -20,9 +22,12 @@ std::unique_ptr<ESP8266WebServer> server;
 //ntp
 WiFiUDP ntpUDP;
 const int mqttMaxPacketSize = 512;
-long  utcAdjust = 1 ;//set local time (Europe/Madrid 1) 
-NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", (utcAdjust*3600), 60000);
-
+long  utcAdjust = 0 ;//No se ajusta, se usará Timezone
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", (utcAdjust*3600), 600000);
+// Central European Time (Frankfurt, Paris)
+TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 120};     // Central European Summer Time
+TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 60};       // Central European Standard Time
+Timezone CE(CEST, CET);
 
 //Telnet allows to see debug logs via network, it allso allows CONTROL of the system if PM_ALLOW_CONTROL is defined
 #define PM_ENABLE_TELNET_ACCESS
@@ -44,16 +49,16 @@ IPAddress PM_LAN_BROADCAST_IP(224, 192, 32, 12);
 
 //Specify your WIFI settings:
  
-long prevMqtt = 0;        // will store last time LED was updated
+long prevMqtt = 0;        // will store last time mqtt was updated
 long intervalMqtt = 60000;           // send data each xxx ms
-
+int doReboot = 0;
 WiFiClient wifiClientMQTT;
 PubSubClient clientMqtt(wifiClientMQTT);
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE  (50)
 char msg[MSG_BUFFER_SIZE];
 int value = 0;
-
+ byte mac[6];
 int logcount = -1;
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -71,7 +76,39 @@ struct LogStruct
   String Message;
 } Logging[21];
 //#define DEBUG_SERIAL true
+
+
+/**
+ * Input time in epoch format and return tm time format
+ * by Renzo Mischianti <www.mischianti.org> 
+ */
+static tm getDateTimeByParams(long time){
+    struct tm *newtime;
+    const time_t tim = time;
+    newtime = localtime(&tim);
+    return *newtime;
+}
+/**
+ * Input tm time format and return String with format pattern
+ * by Renzo Mischianti <www.mischianti.org>
+ */
+static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d/%m/%Y %H:%M:%S"){
+    char buffer[30];
+    strftime(buffer, 30, pattern, newtime);
+    return buffer;
+}
  
+/**
+ * Input time in epoch format format and return String with format pattern
+ * by Renzo Mischianti <www.mischianti.org> 
+ */
+static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%Y %H:%M:%S"){
+//    struct tm *newtime;
+    tm newtime;
+    newtime = getDateTimeByParams(time);
+    return getDateTimeStringByParams(&newtime, pattern);
+}
+
 void addLog(byte loglevel, String& string)
 {
   addLog(loglevel, string.c_str());
@@ -89,7 +126,7 @@ void addLog(const char *line)
     if (logcount > 20)
       logcount = 0;
       
-    Logging[logcount].formatedTime = timeClient.getFormattedTime();  
+    Logging[logcount].formatedTime = getEpochStringByParams(CE.toLocal(now()));//timeClient.getFormattedTime();  
     Logging[logcount].timeStamp = millis();
     Logging[logcount].Message = line;
  
@@ -150,7 +187,7 @@ public:
             publishAlarmFlags();publishAlarmStat();
             break;
         default: //"Disarm"
-            addLog("Default case");
+            addLog("Default case"+String(Buff->buffer[4]));
             publishAlarmFlags();publishAlarmStat();
             break;
         }        
@@ -185,7 +222,7 @@ public:
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
-           addLog("Zone: "+(String)zoneId+" Name:"+this->getZoneName(zoneId));
+           addLog("Zone: "+(String)zoneId+" Name: "+this->getZoneName(zoneId));
            publishAlarmZone(zoneId);
            
            
@@ -258,23 +295,20 @@ void handleDisarm() {
   addHeader(true, reply);
   pm.sendCommand(Pmax_DISARM);
   
-  server->send(200, "text/html", reply);
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane",""); 
 }
 void handleArmaway() {
-  String reply = "";
-  addHeader(true, reply);
+ 
   pm.sendCommand(Pmax_ARMAWAY);
-  
-  
-  server->send(200, "text/html", reply);
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane",""); 
 }
 void handleArmHome() {
-  String reply = "";
-  addHeader(true, reply);
+ 
   pm.sendCommand(Pmax_ARMHOME);
-  
-  
-  server->send(200, "text/html", reply);
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane",""); 
 }
 void handleUpload(){
 
@@ -299,6 +333,7 @@ void handleRoot() {
     String reply = "";
   addHeader(true, reply);
   char szTmp[PRINTF_BUF*2];
+  
   /*
    * 
       json["mqtt_server"] = mqtt_server;
@@ -309,17 +344,25 @@ void handleRoot() {
    * 
    * 
    */
+  String localTime = getEpochStringByParams(CE.toLocal(now()));
   int enrolledZones = pm.getEnrolledZoneCnt();
-  reply+="<h1 id=\"rcorners1\">"+alarmStatus+"</h1>";
-  sprintf(szTmp, "<br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s ",
-                  (int)days, (int)hours, (int)minutes, (int)val, ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
-  reply+=szTmp;
-  sprintf(szTmp,"<br><b>ESP SDK:</b> %s",ESP.getSdkVersion());
-  reply+=szTmp;
-  reply+="<br><b>ESP Core:</b> "+ESP.getCoreVersion();
-  sprintf(szTmp,"<br><b>MQTT_MAX_PACKET_SIZE:</b> %02d (Need more of 256)",(int)clientMqtt.getBufferSize()); 
-  reply+=szTmp;
-  reply+="</html>";
+  reply += F("<h1 id=\"rcorners1\">");
+  reply +=alarmStatus;
+  reply += F("</h1>");
+  sprintf_P(szTmp, PSTR("<br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s "),
+                  (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
+  reply += szTmp;
+  
+  sprintf_P(szTmp,PSTR("<br><b>ESP SDK:</b> %s"),ESP.getSdkVersion());
+  reply += szTmp;
+  sprintf_P(szTmp,PSTR("<br><b>ESP Reset Reason:</b> %s"),ESP.getResetReason().c_str());
+  reply += szTmp;
+  //reply += F("<br><b>ESP Core:</b> "+ESP.getCoreVersion());
+  sprintf_P(szTmp,PSTR("<br><b>ESP Core:</b> %s"),ESP.getCoreVersion().c_str());
+  reply += szTmp;
+  sprintf_P(szTmp,PSTR("<br><b>MQTT_MAX_PACKET_SIZE:</b> %02d (Need more of 256)"),(int)clientMqtt.getBufferSize()); 
+  reply += szTmp;
+  reply += F("</html>");
   
   //MQTT_MAX_PACKET_SIZE
   server->send(200, "text/html", reply);
@@ -327,9 +370,10 @@ void handleRoot() {
 void handleLog() {
  // if (!isLoggedIn()) return;
 
-  char *TempString = (char*)malloc(80);
+ 
 
   String reply = "";
+  //char reply[2000];
   addHeader(true, reply);
   reply += F("<script language='JavaScript'>function RefreshMe(){window.location = window.location}setTimeout('RefreshMe()', 5000);</script>");
   reply += F("<div class=\"table-responsive\"><table id=\"log\" class=\"table curTx table-condensed table-striped table-hover\">");
@@ -356,7 +400,7 @@ void handleLog() {
   reply += F(" </tbody></table></div>");
   
   server->send(200, "text/html", reply);
-  free(TempString);
+ 
 }  
 void addHeader(boolean showMenu, String& str)
 {
@@ -490,30 +534,22 @@ void handleStatus() {
 
  
 void handleReboot() {
-  ESP.restart(); 
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane","");   
+  doReboot = 1;
 }
 
 
 
 
 void handleNotFound(){
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += server->uri();
-  message += "\nMethod: ";
-  message += (server->method() == HTTP_GET)?"GET":"POST";
-  message += "\nArguments: ";
-  message += server->args();
-  message += "\n";
-  for (uint8_t i=0; i<server->args(); i++){
-    message += " " + server->argName(i) + ": " + server->arg(i) + "\n";
-  }
-  server->send(404, "text/plain", message);
+    server->send(404, "text/plain", "Not found");
 }
 
 void setup(void){
-
+ 
   Serial.begin(9600);
+ 
 // checkFS 
    createFS();
    wifiManagerSetup();
@@ -531,7 +567,7 @@ void setup(void){
    
   //Serial.print("Connected, IP address: ");
   //Serial.println(WiFi.localIP());
-  
+  timeClient.update();
   server->on("/", handleRoot);
   server->on("/status", handleStatus);
   server->on("/reboot", handleReboot);
@@ -564,7 +600,9 @@ void setup(void){
   pm.init();
   //clientMqtt.EspMQTTClient(NULL, NULL, "mqttServerIp", NULL, NULL, "mqttClientName", "mqttServerPort");
  
- 
+WiFi.macAddress(mac);
+//mqtt_client = mqtt_client +"_"+ mac[2]+ mac[3]+ mac[4]+ mac[5];
+sprintf_P(mqtt_client,PSTR("EspPowerMax_%02X%02X%02X%02X"),mac[2], mac[3], mac[4], mac[5]);
 connectMqtt();
   timeClient.begin();
     // Optionnal functionnalities of EspMQTTClient : 
@@ -885,6 +923,12 @@ void loop(void){
 
   server->handleClient();
 
+  if (doReboot > 0){
+   doReboot=doReboot+1;
+  }
+  if (doReboot > 100){
+    ESP.restart();  
+  }
   static unsigned long lastMsg = 0;
   if(serialHandler(&pm) == true)
   {
@@ -899,7 +943,7 @@ void loop(void){
   if(pm.restoreCommsIfLost()) //if we fail to get PINGs from the alarm - we will attempt to restore the connection
   {
     DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");  
-    addLog( "Connection lost. Sending RESTORE request.");  
+   // addLog( "Connection lost. Sending RESTORE request.");  
     //Serial.println("Connection lost. Sending RESTORE request.");   
   }   
 
@@ -908,7 +952,7 @@ void loop(void){
   handleTelnetRequests(&pm);
 #endif  
       loopMQTT();
-      timeClient.update();
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1000,6 +1044,7 @@ int os_pmComPortRead(void* readBuff, int bytesToRead)
         dwTotalRead ++;
         readBuff = ((char*)readBuff) + 1;
         bytesToRead--;
+  
     }
 
     return dwTotalRead;
@@ -1059,10 +1104,20 @@ void loopMQTT(){
     if(currentMillis - prevMqtt > intervalMqtt and clientMqtt.connected()) {
    
      prevMqtt = currentMillis;   
-     publishAlarmStat();     
-     publishAlarmFlags();  
-     publishAlarmZones();
+     //publishAlarmStat();     
+     //publishAlarmFlags();  
+     //publishAlarmZones();
+      if (timeClient.update()){
+       
+         unsigned long epoch = timeClient.getEpochTime();
+         setTime(epoch);
+      }else{
+          
+      }
+      DEBUG(LOG_INFO,"MQTT loop");
     }
 
         
 }
+
+ 
