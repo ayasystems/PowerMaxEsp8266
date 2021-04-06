@@ -13,9 +13,10 @@ String macToStr(const uint8_t* mac){
     
     return result;
 }
-
-void callbackMqtt(char* topic, byte* payload, unsigned int length) {
+/*
+void callbackMqtt_old(char* topic, byte* payload, unsigned int length) {
    String srtPayload;
+   
    for (int i=0;i<length;i++) {
         char receivedChar = (char)payload[i];
         srtPayload+=receivedChar;
@@ -30,6 +31,35 @@ void callbackMqtt(char* topic, byte* payload, unsigned int length) {
     if(srtPayload=="ARMAWAY")
       pm.sendCommand(Pmax_ARMAWAY);
     if(srtPayload=="REBOOT")
+      ESP.restart();
+  }
+
+
+
+}
+*/
+void callbackMqtt(char* topic, byte* payload, unsigned int length) {
+  
+        char message[51];
+        int maxlength = 50;
+        if (length < 50) {
+            maxlength = length;
+        }
+        for (int i = 0; i < maxlength; i++) {
+            message[i] = (char)payload[i];
+            message[i + 1] = '\0';
+        }
+ 
+  addLog("MQTT: callbackMqtt: "+(String)topic+" "+message);  
+     
+  if (strcmp(topic,"powermax/command")==0){
+    if((strcmp(message, "ARMHOME") == 0))
+      pm.sendCommand(Pmax_ARMHOME);
+    if((strcmp(message, "DISARM") == 0))
+      pm.sendCommand(Pmax_DISARM);
+    if((strcmp(message, "ARMAWAY") == 0))
+      pm.sendCommand(Pmax_ARMAWAY);
+    if((strcmp(message, "REBOOT") == 0))
       ESP.restart();
   }
 
@@ -70,6 +100,7 @@ void publishAlarmStat(){
     
     clientMqtt.publish("powermax/stat", output.c_str()); // You can activate the retain flag by setting the third parameter to true
     //Serial.println("loop publish status");
+    doc.clear();
           
   
 }
@@ -89,7 +120,7 @@ void publishAlarmFlags(){
     doc["flags_zoneEvent"]      = pm.isFlagSet(5);
     doc["flags_armDisarmEvent"] = pm.isFlagSet(6);
     doc["flags_alarmEvent"]     = pm.isFlagSet(7);
-        
+    doc["FreeHeap"] = ESP.getFreeHeap();
     
     
     String output;
@@ -97,7 +128,7 @@ void publishAlarmFlags(){
     
     clientMqtt.publish("powermax/flags", output.c_str()); // You can activate the retain flag by setting the third parameter to true
     //Serial.println("loop publish flags");
-          
+    doc.clear();
   
 }
 
@@ -162,6 +193,7 @@ void publishAlarmZone(int ix){
                         addLog( "ERROR -> Publish powermax/zone " ); 
                         addLog(output);
                       }
+                      doc.clear();    
              
                  }  
 }
@@ -176,7 +208,8 @@ void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr)
   if(!clientMqtt.publish("powermax/system", output.c_str())){
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
-  }
+  }  
+  doc.clear();
 }
 void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned char armType, const char* armTypeStr){
   String output;  
@@ -191,6 +224,7 @@ void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
+  doc.clear();
 }
 
 void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsigned char zoneTripped, const char* zoneTrippedStr){
@@ -206,6 +240,7 @@ void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsi
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   } 
+  doc.clear();
 
 }
 
@@ -220,4 +255,5 @@ void publishAlarmCancelled(unsigned char whoDisarmed, const char* whoDisarmedStr
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
+  doc.clear();
 }
