@@ -109,12 +109,12 @@ static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%
     return getDateTimeStringByParams(&newtime, pattern);
 }
 
-void addLog(byte loglevel, String& string)
+void addLog(byte loglevel, String string)
 {
   addLog(loglevel, string.c_str());
 }
 
-void addLog(String& string)
+void addLog(String string)
 {
   addLog( string.c_str());
 }

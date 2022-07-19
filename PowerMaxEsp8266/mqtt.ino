@@ -50,7 +50,7 @@ void callbackMqtt(char* topic, byte* payload, unsigned int length) {
             message[i + 1] = '\0';
         }
  
-  addLog("MQTT: callbackMqtt: "+(String)topic+" "+message);  
+//  addLog("MQTT: callbackMqtt: "+(String)topic+" "+message);  
      
   if (strcmp(topic,"powermax/command")==0){
     if((strcmp(message, "ARMHOME") == 0))

@@ -141,7 +141,7 @@ void createFS(){
               
               char jsonLog[1024];
               serializeJson(json, jsonLog);
-              addLog("LOAD: "+String(jsonLog));
+//              addLog("LOAD: "+String(jsonLog));
 
             } else {
               addLog("failed to load json config");

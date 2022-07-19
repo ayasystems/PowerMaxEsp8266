@@ -46,3 +46,7 @@ Messages:
 * DISARM -> Raise disarm command into Powermax pannel
 * ARMAWAY -> Raise armaway command into Powermax pannel 
 * REBOOT -> Reboot ESP8266
+
+## Compilation
+
+To import .zip libraries, in Arduino IDE, use *Sketch->Include Library->Add Zip Library*
