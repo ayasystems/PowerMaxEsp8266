@@ -216,9 +216,15 @@ public:
     
     virtual void OnStatusUpdatePanel(const PlinkBuffer  * Buff)    
     {
-        //call base class implementation first, this will send ACK back and upate internal state.
-        PowerMaxAlarm::OnStatusUpdatePanel(Buff);
-              
+      //call base class implementation first, this will send ACK back and upate internal state.
+      PowerMaxAlarm::OnStatusUpdatePanel(Buff);
+
+      // Publish stat on event
+      publishAlarmStat();
+
+      // Publish flags on event
+      publishAlarmFlags();
+
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
