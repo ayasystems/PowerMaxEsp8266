@@ -17,14 +17,14 @@ Into folder libraries you can find the used libraries to compile
 ![Web](https://github.com/ayasystems/PowerMaxEsp8266/raw/master/powermax_pinout.JPG)
 ## OUTPUT TOPICS
 # powermax/stat
-Send info about alarm status (sending info each minute)
+Send info about alarm status (sending info each minute or when event occurs)
 
 Example
 
 * {"stat":"0","stat_str":"Disarmed","lastCom":0,"panelType":"2","panelTypeStr":"PowerMax Pro","panelModelType":"5","alarmState":"0","alarmStateStr":"None"}
 * {"stat":"1","stat_str":"Exit Delay","lastCom":3,"panelType":"2","panelTypeStr":"PowerMax Pro","panelModelType":"5","alarmState":"0","alarmStateStr":"None"}
 # powermax/flags
-Send info about alarm status (sending info each minute)
+Send info about alarm status (sending info each minute or when event occurs)
 * {"flags":"39","flags_ready":true,"flags_alertInMemory":true,"flags_trouble":true,"flags_bypasOn":false,"flags_last10sec":false,"flags_zoneEvent":true,"flags_armDisarmEvent":false,"flags_alarmEvent":false}
 
 * {"flags":"69","flags_ready":true,"flags_alertInMemory":false,"flags_trouble":true,"flags_bypasOn":false,"flags_last10sec":false,"flags_zoneEvent":false,"flags_armDisarmEvent":true,"flags_alarmEvent":false}
@@ -46,3 +46,7 @@ Messages:
 * DISARM -> Raise disarm command into Powermax pannel
 * ARMAWAY -> Raise armaway command into Powermax pannel 
 * REBOOT -> Reboot ESP8266
+
+## Compilation
+
+To import .zip libraries, in Arduino IDE, use *Sketch->Include Library->Add Zip Library*

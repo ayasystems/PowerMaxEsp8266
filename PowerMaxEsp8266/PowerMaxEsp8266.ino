@@ -109,12 +109,12 @@ static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%
     return getDateTimeStringByParams(&newtime, pattern);
 }
 
-void addLog(byte loglevel, String& string)
+void addLog(byte loglevel, String string)
 {
   addLog(loglevel, string.c_str());
 }
 
-void addLog(String& string)
+void addLog(String string)
 {
   addLog( string.c_str());
 }
@@ -216,9 +216,15 @@ public:
     
     virtual void OnStatusUpdatePanel(const PlinkBuffer  * Buff)    
     {
-        //call base class implementation first, this will send ACK back and upate internal state.
-        PowerMaxAlarm::OnStatusUpdatePanel(Buff);
-              
+      //call base class implementation first, this will send ACK back and upate internal state.
+      PowerMaxAlarm::OnStatusUpdatePanel(Buff);
+
+      // Publish stat on event
+      publishAlarmStat();
+
+      // Publish flags on event
+      publishAlarmFlags();
+
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
