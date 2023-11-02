@@ -12,7 +12,7 @@
 #include <time.h>
 #include <Timezone.h>    // https://github.com/JChristensen/Timezone
 //#include <SoftwareSerial.h>
-//#define MQTT_MAX_PACKET_SIZE 512 //need to change in PubSubClient.h library
+#define MQTT_MAX_PACKET_SIZE 756 //need to change in PubSubClient.h library
 #include <PubSubClient.h>
 #include <ArduinoJson.h>//v6
 //////////////////// IMPORTANT DEFINES, ADJUST TO YOUR NEEDS //////////////////////
@@ -21,7 +21,7 @@ std::unique_ptr<ESP8266WebServer> server;
  
 //ntp
 WiFiUDP ntpUDP;
-const int mqttMaxPacketSize = 512;
+const int mqttMaxPacketSize = 756;
 long  utcAdjust = 0 ;//No se ajusta, se usará Timezone
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", (utcAdjust*3600), 600000);
 // Central European Time (Frankfurt, Paris)
@@ -53,6 +53,7 @@ long prevMqtt = 0;        // will store last time mqtt was updated
 long intervalMqtt = 60000;           // send data each xxx ms
 int doReboot = 0;
 WiFiClient wifiClientMQTT;
+WiFiManager wifiManager;
 PubSubClient clientMqtt(wifiClientMQTT);
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE  (50)
@@ -63,7 +64,7 @@ int logcount = -1;
 //flag for saving data
 bool shouldSaveConfig = false;
 
-char mqtt_server[40];
+char mqtt_server[40] = "none";
 char mqtt_port[6] = "1883";
 char mqtt_user[40];
 char mqtt_pass[40];
@@ -92,7 +93,7 @@ static tm getDateTimeByParams(long time){
  * Input tm time format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org>
  */
-static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d/%m/%Y %H:%M:%S"){
+static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
     char buffer[30];
     strftime(buffer, 30, pattern, newtime);
     return buffer;
@@ -102,19 +103,19 @@ static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d
  * Input time in epoch format format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org> 
  */
-static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%Y %H:%M:%S"){
+static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
 //    struct tm *newtime;
     tm newtime;
     newtime = getDateTimeByParams(time);
     return getDateTimeStringByParams(&newtime, pattern);
 }
 
-void addLog(byte loglevel, String string)
+void addLog(byte loglevel, String& string)
 {
   addLog(loglevel, string.c_str());
 }
 
-void addLog(String string)
+void addLog(String& string)
 {
   addLog( string.c_str());
 }
@@ -138,7 +139,7 @@ void addLog(byte loglevel, const char *line)
     logcount++;
     if (logcount > 20)
       logcount = 0;
-    Logging[logcount].formatedTime = timeClient.getFormattedTime();    
+    Logging[logcount].formatedTime = getEpochStringByParams(CE.toLocal(now()));//timeClient.getFormattedTime();    
     Logging[logcount].timeStamp = millis();
     Logging[logcount].Message = line;
  
@@ -216,15 +217,9 @@ public:
     
     virtual void OnStatusUpdatePanel(const PlinkBuffer  * Buff)    
     {
-      //call base class implementation first, this will send ACK back and upate internal state.
-      PowerMaxAlarm::OnStatusUpdatePanel(Buff);
-
-      // Publish stat on event
-      publishAlarmStat();
-
-      // Publish flags on event
-      publishAlarmFlags();
-
+        //call base class implementation first, this will send ACK back and upate internal state.
+        PowerMaxAlarm::OnStatusUpdatePanel(Buff);
+              
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
@@ -296,14 +291,29 @@ void LOG(const char *format, ...)
   va_end(ap);
 }
 
+void handlewm(){
+  wifiManager.setConfigPortalTimeout(120);
+  !wifiManager.startConfigPortal("OnDemandAP","");
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane",""); 
+}
 void handleDisarm() {
-  String reply = "";
-  addHeader(true, reply);
+ 
   pm.sendCommand(Pmax_DISARM);
   
   server->sendHeader("Location", "/",true); //Redirect to our html web page 
   server->send(302, "text/plane",""); 
 }
+
+
+void handleTime() {
+   
+  server->sendHeader("Location", "/",true); //Redirect to our html web page 
+  server->send(302, "text/plane",""); 
+   setTime();
+}
+
+
 void handleArmaway() {
  
   pm.sendCommand(Pmax_ARMAWAY);
@@ -352,10 +362,22 @@ void handleRoot() {
    */
   String localTime = getEpochStringByParams(CE.toLocal(now()));
   int enrolledZones = pm.getEnrolledZoneCnt();
-  reply += F("<h1 id=\"rcorners1\">");
+  reply += F("<h3 id=\"rcorners1\">");
   reply +=alarmStatus;
-  reply += F("</h1>");
-  sprintf_P(szTmp, PSTR("<br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s "),
+  reply += F("</h3>");
+
+
+  File file2 = SPIFFS.open("/prueba.html", "r");
+  if (!file2) {
+  
+  }else{
+    if (file2.available()) {
+   
+        reply += file2.readString();
+    }
+  }
+  
+  sprintf_P(szTmp, PSTR("<br><br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s "),
                   (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
   reply += szTmp;
   
@@ -366,8 +388,16 @@ void handleRoot() {
   //reply += F("<br><b>ESP Core:</b> "+ESP.getCoreVersion());
   sprintf_P(szTmp,PSTR("<br><b>ESP Core:</b> %s"),ESP.getCoreVersion().c_str());
   reply += szTmp;
-  sprintf_P(szTmp,PSTR("<br><b>MQTT_MAX_PACKET_SIZE:</b> %02d (Need more of 256)"),(int)clientMqtt.getBufferSize()); 
+  sprintf_P(szTmp,PSTR("<br><b>MQTT_MAX_PACKET_SIZE:</b> %02d (Need more of 512)"),(int)clientMqtt.getBufferSize()); 
   reply += szTmp;
+  reply += "<br>";
+  reply += "<br>";
+  reply += "<br>";
+
+
+
+
+  
   reply += F("</html>");
   
   //MQTT_MAX_PACKET_SIZE
@@ -434,6 +464,7 @@ void addHeader(boolean showMenu, String& str)
     
     str += F("</style>");
    str += F("<meta charset=\"utf-8\">");
+   str += F("<script src=\"//code.jquery.com/jquery-3.5.0.js\"></script>");
    str += F("<script src=\"https://ajax.googleapis.com/ajax/libs/jquery/1.12.3/jquery.min.js\"></script>");
    str += F("<link rel=\"stylesheet\" href=\"https://maxcdn.bootstrapcdn.com/bootstrap/latest/css/bootstrap.min.css\">");
    str += F("<link rel=\"stylesheet\" href=\"https://maxcdn.bootstrapcdn.com/bootstrap/latest/css/bootstrap-theme.min.css\">");
@@ -454,6 +485,7 @@ void addHeader(boolean showMenu, String& str)
     //str += F("<a class=\"button-menu\" href=\"reboot\">Reboot</a><BR><BR>");
     str += F("<button onclick=\"window.location.href='./'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-folder-open\" aria-hidden=\"true\"></span>&nbsp;Main</button>");
     str += F("<button onclick=\"window.location.href='./status'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Status</button>");
+    //str += F("<button onclick=\"window.location.href='./prueba.html'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Info</button>");
     str += F("<button onclick=\"window.location.href='./log'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Log</button>");
 
 
@@ -465,8 +497,8 @@ void addHeader(boolean showMenu, String& str)
 
     str += "<BR><BR>";
 
-    str += F("<button onclick=\"window.location.href='./armaway'\"  type=\"button\" class=\"btn btn-danger navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;ARM Away</button>");
-    str += F("<button onclick=\"window.location.href='./armhome'\"  type=\"button\" class=\"btn btn-warning navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;ARM Home</button>");
+    str += F("<button onclick=\"window.location.href='./armaway'\"  type=\"button\" class=\"btn btn-danger navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Away</button>");
+    str += F("<button onclick=\"window.location.href='./armhome'\"  type=\"button\" class=\"btn btn-warning navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Home</button>");
     str += F("<button onclick=\"window.location.href='./disarm'\"  type=\"button\" class=\"btn btn-success navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;DISARM</button>");
 
 
@@ -577,7 +609,32 @@ void setup(void){
   server->on("/", handleRoot);
   server->on("/status", handleStatus);
   server->on("/reboot", handleReboot);
-
+  server->on("/wm", handlewm);
+  server->on("/prueba.html", [](){
+    File fileContent;
+    fileContent = SPIFFS.open("/prueba.html", "r");
+    server->streamFile(fileContent, "text/html");
+    fileContent.close();    
+  });
+    server->on("/battery-status.png", [](){
+    File fileContent;
+    fileContent = SPIFFS.open("/battery-status.png", "r");
+    server->streamFile(fileContent,  "image/png");
+    fileContent.close();    
+  });
+    server->on("/battery-status-full.png", [](){
+    File fileContent;
+    fileContent = SPIFFS.open("/battery-status-full.png", "r");
+    server->streamFile(fileContent, "image/png");
+    fileContent.close();    
+  });
+  server->on("/config.json", [](){
+    File fileContent;
+    fileContent = SPIFFS.open("/config.json", "r");
+    server->streamFile(fileContent, "text/json");
+    fileContent.close();    
+  });
+  server->on("/time", handleTime);
 
   server->on("/armaway", handleArmaway);
   server->on("/armhome", handleArmHome);
@@ -1081,38 +1138,73 @@ int os_cfg_getPacketTimeout()
     return PACKET_TIMEOUT_DEFINED;
 }
 
+void setTime(){
+    unsigned char year;
+    unsigned char month;
+    unsigned char day;
+    unsigned char hour;
+    unsigned char minutes;
+    unsigned char seconds;
+
+    year      = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%y").toInt();
+    month     = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%m").toInt();
+    day       = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%d").toInt();
+    hour      = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%H").toInt();
+    minutes   = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%M").toInt();
+    seconds   = (unsigned char) getEpochStringByParams(CE.toLocal(now()),"%S").toInt();
+    pm.setDateTime(year,month,day,hour,minutes,seconds);
+
+  
+}
 //see PowerMaxAlarm::setDateTime for details of the parameters, if your OS does not have a RTC clock, simply return false
 bool os_getLocalTime(unsigned char& year, unsigned char& month, unsigned char& day, unsigned char& hour, unsigned char& minutes, unsigned char& seconds)
 {
-    return false; //IZIZTODO
+
+ 
+  return false; //IZIZTODO
+  /*
+   // day =  getEpochStringByParams(CE.toLocal(now(),"%d"));
+    strcpy( (char*) year,    getEpochStringByParams(CE.toLocal(now()),"%y").c_str() );
+    strcpy( (char*) month,   getEpochStringByParams(CE.toLocal(now()),"%m").c_str() );
+    strcpy( (char*) day,     getEpochStringByParams(CE.toLocal(now()),"%d").c_str() );
+    strcpy( (char*) hour,    getEpochStringByParams(CE.toLocal(now()),"%H").c_str() );
+    strcpy( (char*) minutes, getEpochStringByParams(CE.toLocal(now()),"%M").c_str() );
+    strcpy( (char*) seconds, getEpochStringByParams(CE.toLocal(now()),"%S").c_str() );
+    return true; //IZIZTODO
+    //return false; //IZIZTODO
+    */
 }
 
 
 
-void loopMQTT(){
- 
-  if (!clientMqtt.connected()) {
-    connectMqtt();
+boolean loopMQTT(){
 
-    if (clientMqtt.connect(mqtt_client)) {
-       addLog("Mqtt connected");
-    } else {
-      addLog("Mqtt failed connection"+(String)clientMqtt.state());
-    }
+  if (strcmp(mqtt_server,"none")!=0){
+       if (!clientMqtt.connected()) {
+        connectMqtt();
     
-    }
- 
-  clientMqtt.loop();
+        if (clientMqtt.connect(mqtt_client)) {
+           addLog("Mqtt connected");
+        } else {
+          addLog("Mqtt failed connection "+(String)clientMqtt.state());
+          return false;
+        }
+        
+      }
+      clientMqtt.loop();
+    }  
  unsigned long currentMillis = millis();
 
  //clientMqtt.loop();//mqttLoop
  
-    if(currentMillis - prevMqtt > intervalMqtt and clientMqtt.connected()) {
+    if(currentMillis - prevMqtt > intervalMqtt ) {
    
      prevMqtt = currentMillis;   
-     publishAlarmStat();     
-     publishAlarmFlags();  
-     publishAlarmZones();
+     if (strcmp(mqtt_server,"none")!=0 and clientMqtt.connected() ){
+       publishAlarmStat();     
+       publishAlarmFlags();  
+       publishAlarmZones();
+     }
       if (timeClient.update()){
        
          unsigned long epoch = timeClient.getEpochTime();
@@ -1123,7 +1215,7 @@ void loopMQTT(){
       DEBUG(LOG_INFO,"MQTT loop");
     }
 
-        
+   return true;     
 }
 
  

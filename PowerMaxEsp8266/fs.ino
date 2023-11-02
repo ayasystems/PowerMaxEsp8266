@@ -6,7 +6,7 @@ void wifiManagerSetup(){
     //Local intialization. Once its business is done, there is no need to keep it around
 //Set hostname
   WiFi.hostname("powermaxEsp"); 
-  WiFiManager wifiManager;
+
   //reset saved settings
   //wifiManager.resetSettings();
   wifiManager.setDebugOutput(false);
