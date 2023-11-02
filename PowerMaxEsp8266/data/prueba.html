@@ -1,0 +1,139 @@
+ 
+<table id="sensors" style="background-color:#cedce9">
+ <thead style="background-color:#797b7d">
+ <th>id</th>
+ <th>Name</th>
+ <th>Type</th>
+ <th>Battery</th>
+ <th>Active</th>
+ <th>Sensor</th>
+ <th>LastEvent</th>
+ <th>Tamper</th>
+ 
+ </thead>
+ <tbody>
+ </tbody>
+</table>
+<br>
+ <table id="Flags" style="background-color:#cedce9">
+ <thead style="background-color:#797b7d">
+ <th>Type</th>
+ <th>Status</th>
+  <tbody>
+ </tbody>
+ </thead>
+</table>
+
+<script>
+
+	function handleData(key, value){
+	var zoneId = key+1;
+	var zoneTypeString = value['zoneTypeStr'];
+	var battIcon = "";
+	
+	if (zoneTypeString == "??"){
+		zoneTypeString = value['zoneType'];
+	}
+	if(value['stat_lowBattery']==false){
+	battIcon = "<img src=\"battery-status-full.png\" alt=\"OK\" width=\"15\">";
+	}else{
+	battIcon = "<img src=\"battery-status.png\" alt=\"LOW\" width=\"15\">";
+	}
+	let lastEventAge = "";
+	if (isNaN(value['lastEventAge'])){
+		lastEventAge = "--:--:--";
+	}else{
+		lastEventAge = value['lastEventAge'];
+		let totalSeconds = lastEventAge;
+		let hours = Math.floor(totalSeconds / 3600);
+		totalSeconds %= 3600;
+		let minutes = Math.floor(totalSeconds / 60);
+		let seconds = totalSeconds % 60;
+		minutes = String(minutes).padStart(2, "0");
+		hours = String(hours).padStart(2, "0");
+		seconds = String(seconds).padStart(2, "0");
+		lastEventAge = hours + "h:" + minutes + "m:" + seconds+"s";		
+	}
+
+
+	var html= "<tr><td>"+zoneId+"</td>"+
+			  "<td>"+value['zoneName']+"</td>"+
+			  "<td align=\"center\">"+zoneTypeString+"</td>"+
+			  "<td align=\"center\">"+battIcon+"</td>"+
+			  "<td align=\"center\">"+value['stat_active']+"</td>"+
+			  "<td align=\"center\">"+value['sensorType']+"</td>"+
+			  "<td align=\"center\">"+lastEventAge+"</td>"+
+			  "<td align=\"center\">"+value['stat_tamper']+"</td>"+
+			  "</tr>";
+	  $('#sensors tbody').append(html );
+	}
+	
+	
+	function handleList(data){
+		  $('#sensors tbody tr').remove();
+		  $.each(data, handleData);
+  
+ 
+	};	
+	function fillTableSensors(){
+	$(".loader").show();		
+	   $.getJSON('status', function (data) {
+		  handleList(data.enroled_zones);
+		  
+	var html= 
+			  "<tr><td>ready</td>"+
+			  "<td>"+data.flags_ready+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );	
+	  
+ 	var html= "<tr><td>alertInMemory</td>"+
+			  "<td>"+data.flags_alertInMemory+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );	
+	  
+ 	var html= "<tr><td>trouble</td>"+
+			  "<td>"+data.flags_trouble+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );	
+	  
+ 	var html= "<tr><td>bypasOn</td>"+
+			  "<td>"+data.flags_bypasOn+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );		  
+ 	  
+ 	var html= "<tr><td>last10sec</td>"+
+			  "<td>"+data.flags_last10sec+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );		  
+ 	  
+ 	var html= "<tr><td>zoneEvent</td>"+
+			  "<td>"+data.flags_zoneEvent+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );		  
+ 	  
+ 	var html= "<tr><td>armDisarmEvent</td>"+
+			  "<td>"+data.flags_armDisarmEvent+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );		  
+  	  
+ 	var html= "<tr><td>alarmEvent</td>"+
+			  "<td>"+data.flags_alarmEvent+"</td>"+
+			  "</tr>";
+	  $('#Flags tbody').append(html );				  
+	   })	
+ 	   .done(function() {
+ 			
+	   })	
+	   .fail(function(jqXHR, textStatus, errorThrown) {			   
+		   showToast('Error','getJSON request failed!\n' + textStatus +'\n' + errorThrown,'danger',5);
+		})	   
+	}
+	$( document ).ready(function() {
+	    
+	   fillTableSensors();	
+	   $(".loader").hide(1000); 
+  
+	});
+</script>
+
+ 
