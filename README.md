@@ -1,7 +1,8 @@
 # PowerMaxEsp8266
 PowerMax gateway ESP8266
 
-![Web](https://github.com/ayasystems/PowerMaxEsp8266/raw/master/web_panel_new.jpg)
+![image](https://github.com/ayasystems/PowerMaxEsp8266/assets/7864168/33828593-8d9b-4c4f-94fd-ac02a5eb6fa0)
+
 
 
 Thank to irekzielinski to make the library -> https://github.com/irekzielinski/PowerMaxAlarm
