@@ -69,6 +69,7 @@ char mqtt_port[6] = "1883";
 char mqtt_user[40];
 char mqtt_pass[40];
 char mqtt_client[40] = "EspPowerMax";
+bool mqtt_retain = true;
 
 struct LogStruct
 {
@@ -377,8 +378,8 @@ void handleRoot() {
     }
   }
   
-  sprintf_P(szTmp, PSTR("<br><br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s "),
-                  (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
+  sprintf_P(szTmp, PSTR("<br><br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s<br><b>Mqtt Retain:</b> %d "),
+                  (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client,mqtt_retain);  
   reply += szTmp;
   
   sprintf_P(szTmp,PSTR("<br><b>ESP SDK:</b> %s"),ESP.getSdkVersion());
@@ -602,7 +603,7 @@ void setup(void){
   //Serial.println("Reset Reason: " + String(ESP.getResetReason()));
   //Serial.println();
 
-   
+
   // Waiting for Wi-Fi connexion
   //Serial.print("Waiting for Wi-Fi connexion...");
   unsigned long wifiTimeout = millis() + 30000; // Timeout de 30 secondes
