@@ -93,7 +93,7 @@ static tm getDateTimeByParams(long time){
  * Input tm time format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org>
  */
-static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
+static String getDateTimeStringByParams(tm *newtime, const char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
     char buffer[30];
     strftime(buffer, 30, pattern, newtime);
     return buffer;
@@ -103,19 +103,19 @@ static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d
  * Input time in epoch format format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org> 
  */
-static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
+static String getEpochStringByParams(long time, const char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
 //    struct tm *newtime;
     tm newtime;
     newtime = getDateTimeByParams(time);
     return getDateTimeStringByParams(&newtime, pattern);
 }
 
-void addLog(byte loglevel, String& string)
+void addLog(byte loglevel, const String& string)
 {
   addLog(loglevel, string.c_str());
 }
 
-void addLog(String& string)
+void addLog(const String& string)
 {
   addLog( string.c_str());
 }
