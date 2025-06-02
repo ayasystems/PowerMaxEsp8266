@@ -603,9 +603,47 @@ void setup(void){
   //Serial.println();
 
    
-  //Serial.print("Connected, IP address: ");
-  //Serial.println(WiFi.localIP());
-  timeClient.update();
+  // Waiting for Wi-Fi connexion
+  //Serial.print("Waiting for Wi-Fi connexion...");
+  unsigned long wifiTimeout = millis() + 30000; // Timeout de 30 secondes
+  while (WiFi.status() != WL_CONNECTED && millis() < wifiTimeout) {
+      delay(500);
+      //Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+      //Serial.println("WiFi connected, IP : " + WiFi.localIP().toString());
+  } else {
+      //Serial.println("Failling to connect to the wifi network, rebooting...");
+      addLog("Failling to connect to the wifi network, rebooting...");
+      ESP.restart();
+  }
+
+  // Start and force NTP sync
+  timeClient.begin();
+  //Serial.print("Synchronizing NTP...");
+  unsigned long ntpTimeout = millis() + 10000; // 10 secondes timeout
+  bool ntpSuccess = false;
+  while (millis() < ntpTimeout) {
+      if (timeClient.update()) {
+          ntpSuccess = true;
+          break;
+      }
+      //Serial.print(".");
+      timeClient.forceUpdate(); // retry
+      delay(1000);
+  }
+
+  if (ntpSuccess) {
+      //Serial.println("NTP synced : " + timeClient.getFormattedTime());
+      setTime(timeClient.getEpochTime()); // Sync TimeLib
+      addLog("NTP date updated : " + getEpochStringByParams(CE.toLocal(now())));
+  } else {
+      //Serial.println("Failing to get date from NTP");
+      addLog("Failing to get date from NTP");
+  }
+
+
+  //timeClient.update();
   server->on("/", handleRoot);
   server->on("/status", handleStatus);
   server->on("/reboot", handleReboot);
