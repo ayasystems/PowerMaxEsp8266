@@ -3,8 +3,8 @@
  
 
 void wifiManagerSetup(){
-    //Local intialization. Once its business is done, there is no need to keep it around
-//Set hostname
+  //Local intialization. Once its business is done, there is no need to keep it around
+  //Set hostname
   WiFi.hostname("powermaxEsp"); 
 
   //reset saved settings
@@ -14,8 +14,8 @@ void wifiManagerSetup(){
   WiFiManagerParameter custom_mqtt_port("mqtt_port", "mqtt_port", mqtt_port, 6);
   WiFiManagerParameter custom_mqtt_user("mqtt_user", "mqtt_user", mqtt_user, 40); 
   WiFiManagerParameter custom_mqtt_pass("mqtt_pass", "mqtt_pass", mqtt_pass, 40);
-  WiFiManagerParameter custom_mqtt_client("mqtt_client", "mqtt_client", mqtt_client, 40);  
-
+  WiFiManagerParameter custom_mqtt_client("mqtt_client", "mqtt_client", mqtt_client, 40);
+  WiFiManagerParameter custom_mqtt_retain("mqtt_retain", "mqtt_retain", "true", 6);
   //WiFiManager
 
 
@@ -31,7 +31,7 @@ void wifiManagerSetup(){
   wifiManager.addParameter(&custom_mqtt_user);
   wifiManager.addParameter(&custom_mqtt_pass);
   wifiManager.addParameter(&custom_mqtt_client);
-
+  wifiManager.addParameter(&custom_mqtt_retain);
  
 
   //set minimu quality of signal so it ignores AP's under that quality
@@ -69,6 +69,8 @@ wifiManager.autoConnect();
   strcpy(mqtt_user, custom_mqtt_user.getValue());
   strcpy(mqtt_pass, custom_mqtt_pass.getValue());
   strcpy(mqtt_client, custom_mqtt_client.getValue());
+  const char* retain_str = custom_mqtt_retain.getValue();
+  mqtt_retain = (strcmp(retain_str, "true") == 0);
 
   //save the custom parameters to FS
   if (shouldSaveConfig) {
@@ -82,6 +84,7 @@ wifiManager.autoConnect();
     json["mqtt_user"] = mqtt_user;
     json["mqtt_pass"] = mqtt_pass;
     json["mqtt_client"] = mqtt_client;
+    json["mqtt_retain"] = mqtt_retain ? "true" : "false";
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
@@ -138,6 +141,10 @@ void createFS(){
               strcpy(mqtt_user,   json["mqtt_user"]);
               strcpy(mqtt_pass,   json["mqtt_pass"]);
               strcpy(mqtt_client, json["mqtt_client"]);
+              if (json.containsKey("mqtt_retain")) {
+                const char* retain_str = json["mqtt_retain"];
+                mqtt_retain = (strcmp(retain_str, "true") == 0);
+              }
               
               char jsonLog[1024];
               serializeJson(json, jsonLog);

@@ -69,6 +69,7 @@ char mqtt_port[6] = "1883";
 char mqtt_user[40];
 char mqtt_pass[40];
 char mqtt_client[40] = "EspPowerMax";
+bool mqtt_retain = true;
 
 struct LogStruct
 {
@@ -93,7 +94,7 @@ static tm getDateTimeByParams(long time){
  * Input tm time format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org>
  */
-static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
+static String getDateTimeStringByParams(tm *newtime, const char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
     char buffer[30];
     strftime(buffer, 30, pattern, newtime);
     return buffer;
@@ -103,19 +104,19 @@ static String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d
  * Input time in epoch format format and return String with format pattern
  * by Renzo Mischianti <www.mischianti.org> 
  */
-static String getEpochStringByParams(long time, char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
+static String getEpochStringByParams(long time, const char* pattern = (char *)"%d/%m/%y %H:%M:%S"){
 //    struct tm *newtime;
     tm newtime;
     newtime = getDateTimeByParams(time);
     return getDateTimeStringByParams(&newtime, pattern);
 }
 
-void addLog(byte loglevel, String& string)
+void addLog(byte loglevel, const String& string)
 {
   addLog(loglevel, string.c_str());
 }
 
-void addLog(String& string)
+void addLog(const String& string)
 {
   addLog( string.c_str());
 }
@@ -377,8 +378,8 @@ void handleRoot() {
     }
   }
   
-  sprintf_P(szTmp, PSTR("<br><br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s "),
-                  (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client);  
+  sprintf_P(szTmp, PSTR("<br><br><br><b>Uptime:</b> %02d days %02d:%02d.%02d<br><b>Local time:</b> %s<br><b>Free heap:</b> %u<br><b>Enrolled Zones:</b> %03d<br><b>Mqtt Server:</b> %s<br><b>Mqtt Port:</b> %s<br><b>Mqtt User: %s</b><br><b>Mqtt Pass:</b> *********<br><b>Mqtt ClientId:</b> %s<br><b>Mqtt Retain:</b> %d "),
+                  (int)days, (int)hours, (int)minutes, (int)val,localTime.c_str() ,ESP.getFreeHeap(),enrolledZones,mqtt_server,mqtt_port,mqtt_user,mqtt_client,mqtt_retain);  
   reply += szTmp;
   
   sprintf_P(szTmp,PSTR("<br><b>ESP SDK:</b> %s"),ESP.getSdkVersion());
@@ -602,10 +603,48 @@ void setup(void){
   //Serial.println("Reset Reason: " + String(ESP.getResetReason()));
   //Serial.println();
 
-   
-  //Serial.print("Connected, IP address: ");
-  //Serial.println(WiFi.localIP());
-  timeClient.update();
+
+  // Waiting for Wi-Fi connexion
+  //Serial.print("Waiting for Wi-Fi connexion...");
+  unsigned long wifiTimeout = millis() + 30000; // Timeout de 30 secondes
+  while (WiFi.status() != WL_CONNECTED && millis() < wifiTimeout) {
+      delay(500);
+      //Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+      //Serial.println("WiFi connected, IP : " + WiFi.localIP().toString());
+  } else {
+      //Serial.println("Failling to connect to the wifi network, rebooting...");
+      addLog("Failling to connect to the wifi network, rebooting...");
+      ESP.restart();
+  }
+
+  // Start and force NTP sync
+  timeClient.begin();
+  //Serial.print("Synchronizing NTP...");
+  unsigned long ntpTimeout = millis() + 10000; // 10 secondes timeout
+  bool ntpSuccess = false;
+  while (millis() < ntpTimeout) {
+      if (timeClient.update()) {
+          ntpSuccess = true;
+          break;
+      }
+      //Serial.print(".");
+      timeClient.forceUpdate(); // retry
+      delay(1000);
+  }
+
+  if (ntpSuccess) {
+      //Serial.println("NTP synced : " + timeClient.getFormattedTime());
+      setTime(timeClient.getEpochTime()); // Sync TimeLib
+      addLog("NTP date updated : " + getEpochStringByParams(CE.toLocal(now())));
+  } else {
+      //Serial.println("Failing to get date from NTP");
+      addLog("Failing to get date from NTP");
+  }
+
+
+  //timeClient.update();
   server->on("/", handleRoot);
   server->on("/status", handleStatus);
   server->on("/reboot", handleReboot);

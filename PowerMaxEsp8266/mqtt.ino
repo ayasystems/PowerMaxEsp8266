@@ -1,4 +1,5 @@
- 
+extern bool mqtt_retain;
+
 String macToStr(const uint8_t* mac){
 
     String result;
@@ -100,7 +101,7 @@ void publishAlarmStat(){
     String output;
     serializeJson(doc, output);
     
-    clientMqtt.publish("powermax/stat", output.c_str()); // You can activate the retain flag by setting the third parameter to true
+    clientMqtt.publish("powermax/stat", output.c_str(), mqtt_retain); // You can activate the retain flag by setting the third parameter to true
     DEBUG(LOG_INFO,"powermax/stat");
     doc.clear();
           
@@ -129,7 +130,7 @@ void publishAlarmFlags(){
     String output;
     serializeJson(doc, output);
     
-    clientMqtt.publish("powermax/flags", output.c_str()); // You can activate the retain flag by setting the third parameter to true
+    clientMqtt.publish("powermax/flags", output.c_str(), mqtt_retain); // You can activate the retain flag by setting the third parameter to true
     DEBUG(LOG_INFO,"powermax/flags");
     doc.clear();
   
@@ -162,14 +163,14 @@ void publishAlarmZone(unsigned char ix){
 }
 void publishAlarmZone(int ix){
                  // int alarmTrippedZone;
-                  Zone alarmZone;   
+                  Zone alarmZone;
                   unsigned long  currentTime = os_getCurrentTimeSec();             
                  //  int enrolledZones = pm.getEnrolledZoneCnt();
                   alarmZone = pm.getAlarmZone(ix);
                
                   //addLog("ix: "+(String)ix+" SensorId: "+(String)alarmZone.sensorId+" tripped: "+(String)alarmTrippedZone+" Enroled: "+(String)alarmZone.enrolled);
                   if(alarmZone.enrolled){
-                   
+                                
                       StaticJsonDocument<mqttMaxPacketSize> doc;
                       
                       doc["client"]              = mqtt_client;
@@ -193,15 +194,19 @@ void publishAlarmZone(int ix){
                       doc["stat_tamper"]         = alarmZone.stat.tamper;
                       String output;
                       serializeJson(doc, output);
-               
-                      if(!clientMqtt.publish("powermax/zone", output.c_str())){
+                      
+                      if(!clientMqtt.publish("powermax/zone", output.c_str(), mqtt_retain)){
                         addLog( "ERROR -> Publish powermax/zone " ); 
                         addLog(output);
                       }
-                      doc.clear();                         
+                      // Publish to specific topic: powermax/zoneX (easier to manage in HomeAssistant)
+                      String specificTopic = "powermax/zone" + String(ix);
+                      clientMqtt.publish(specificTopic.c_str(), output.c_str(), mqtt_retain);
+                      
+                      doc.clear();
                       DEBUG(LOG_INFO,"powermax/zone");
              
-                 }  
+                 }
 }
   
 void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr){
@@ -213,7 +218,7 @@ void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr)
   doc["whoDisarmedStr"]         = whoDisarmedStr;
   serializeJson(doc, output);
   addLog("DISARMED: "+output);
-  if(!clientMqtt.publish("powermax/system", output.c_str())){
+  if(!clientMqtt.publish("powermax/system", output.c_str(), mqtt_retain)){
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }  
@@ -230,7 +235,7 @@ void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned
   doc["armTypeStr"]          = armTypeStr;
   serializeJson(doc, output);
   addLog("ARMED: "+output);
-  if(!clientMqtt.publish("powermax/system", output.c_str())){
+  if(!clientMqtt.publish("powermax/system", output.c_str(), mqtt_retain)){
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
@@ -248,7 +253,7 @@ void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsi
   doc["zoneTrippedStr"]     = zoneTrippedStr;
   serializeJson(doc, output);
   addLog("ALARMSTARTED: "+output);
-  if(!clientMqtt.publish("powermax/system", output.c_str())){
+  if(!clientMqtt.publish("powermax/system", output.c_str(), mqtt_retain)){
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   } 
@@ -265,7 +270,7 @@ void publishAlarmCancelled(unsigned char whoDisarmed, const char* whoDisarmedStr
   doc["whoDisarmedStr"]         = whoDisarmedStr;
   serializeJson(doc, output);
   addLog("ALARMCANCELLED: "+output);
-  if(!clientMqtt.publish("powermax/system", output.c_str())){
+  if(!clientMqtt.publish("powermax/system", output.c_str(), mqtt_retain)){
     addLog( "ERROR -> Publish powermax/system " ); 
     addLog(output);
   }
