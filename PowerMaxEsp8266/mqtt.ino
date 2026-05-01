@@ -54,31 +54,85 @@ void callbackMqtt(char* topic, byte* payload, unsigned int length) {
   addLog("MQTT: callbackMqtt: "+(String)topic+" "+message);  
      
   if (strcmp(topic,"powermax/command")==0){
-    if((strcmp(message, "ARMHOME") == 0))
+    if((strcmp(message, "ARMHOME") == 0)) {
       pm.sendCommand(Pmax_ARMHOME);
-    if((strcmp(message, "DISARM") == 0))
+      clientMqtt.publish("powermax/command_ack", "{\"command\":\"ARMHOME\",\"status\":\"received\"}", false);
+    }
+    else if((strcmp(message, "DISARM") == 0)) {
       pm.sendCommand(Pmax_DISARM);
-    if((strcmp(message, "ARMAWAY") == 0))
+      clientMqtt.publish("powermax/command_ack", "{\"command\":\"DISARM\",\"status\":\"received\"}", false);
+    }
+    else if((strcmp(message, "ARMAWAY") == 0)) {
       pm.sendCommand(Pmax_ARMAWAY);
-    if((strcmp(message, "REBOOT") == 0))
+      clientMqtt.publish("powermax/command_ack", "{\"command\":\"ARMAWAY\",\"status\":\"received\"}", false);
+    }
+    else if((strcmp(message, "REBOOT") == 0)) {
+      clientMqtt.publish("powermax/command_ack", "{\"command\":\"REBOOT\",\"status\":\"received\"}", false);
+      clientMqtt.publish(MQTT_AVAILABILITY_TOPIC, MQTT_LWT_OFFLINE, true);
+      delay(200);
       ESP.restart();
+    }
+    else if((strcmp(message, "STATUS") == 0)) {
+      // Force immediate status publish
+      publishAlarmStat();
+      publishAlarmFlags();
+      publishAlarmZones();
+      clientMqtt.publish("powermax/command_ack", "{\"command\":\"STATUS\",\"status\":\"received\"}", false);
+    }
+    else {
+      addLog("MQTT: Unknown command: " + String(message));
+    }
   }
-
-
-
 }
 
-void connectMqtt(){
-  if (strcmp(mqtt_server,"none")!=0){
-      clientMqtt.setServer(mqtt_server, atoi(mqtt_port));
-      clientMqtt.setBufferSize(mqttMaxPacketSize);
-      clientMqtt.connect(mqtt_client, mqtt_user, mqtt_pass);
-      clientMqtt.subscribe("powermax/command"); 
-      clientMqtt.setCallback(callbackMqtt);
-  }  
+bool isMqttConfigured() {
+  return (strcmp(mqtt_server, "none") != 0 && strlen(mqtt_server) > 0);
+}
+
+bool isMqttConnected() {
+  return isMqttConfigured() && clientMqtt.connected();
+}
+
+void setupMqtt() {
+  if (!isMqttConfigured()) return;
+  clientMqtt.setServer(mqtt_server, atoi(mqtt_port));
+  clientMqtt.setBufferSize(mqttMaxPacketSize);
+  clientMqtt.setCallback(callbackMqtt);
+}
+
+bool connectMqtt() {
+  if (!isMqttConfigured()) return false;
+
+  // Connect with LWT (Last Will and Testament) for Home Assistant availability
+  bool connected = false;
+  if (strlen(mqtt_user) > 0) {
+    connected = clientMqtt.connect(mqtt_client, mqtt_user, mqtt_pass,
+                                    MQTT_AVAILABILITY_TOPIC, 1, true, MQTT_LWT_OFFLINE);
+  } else {
+    connected = clientMqtt.connect(mqtt_client,
+                                    MQTT_AVAILABILITY_TOPIC, 1, true, MQTT_LWT_OFFLINE);
+  }
+
+  if (connected) {
+    addLog("MQTT connected to " + String(mqtt_server));
+    // Subscribe to command topic
+    clientMqtt.subscribe("powermax/command");
+    // Publish online status (retained)
+    clientMqtt.publish(MQTT_AVAILABILITY_TOPIC, MQTT_LWT_ONLINE, true);
+    // Reset backoff
+    mqttReconnectInterval = 5000;
+    mqttLastReconnectAttempt = 0;
+    return true;
+  } else {
+    addLog("MQTT connection failed, rc=" + String(clientMqtt.state()));
+    // Exponential backoff
+    mqttReconnectInterval = min(mqttReconnectInterval * 2, (unsigned long)MQTT_RECONNECT_MAX_INTERVAL);
+    return false;
+  }
 }
 
 void publishAlarmStat(){
+    if (!isMqttConnected()) return;
 
     StaticJsonDocument<mqttMaxPacketSize> doc;
     SystemStatus stat = pm.getStat();
@@ -95,6 +149,9 @@ void publishAlarmStat(){
     doc["panelModelType"] = (String)modelType;
     doc["alarmState"]     = (String)alarmState;
     doc["alarmStateStr"]  = pm.GetStrPmaxLogEvents(alarmState);    
+    doc["uptime"]          = (unsigned long)(millis() / 1000);
+    doc["freeHeap"]        = ESP.getFreeHeap();
+    doc["wifiRSSI"]        = WiFi.RSSI();
     
     
     
@@ -109,6 +166,7 @@ void publishAlarmStat(){
 }
 
 void publishAlarmFlags(){
+    if (!isMqttConnected()) return;
 
     StaticJsonDocument<mqttMaxPacketSize> doc;
  
@@ -162,6 +220,7 @@ void publishAlarmZone(unsigned char ix){
   publishAlarmZone((int)ix);
 }
 void publishAlarmZone(int ix){
+                  if (!isMqttConnected()) return;
                  // int alarmTrippedZone;
                   Zone alarmZone;
                   unsigned long  currentTime = os_getCurrentTimeSec();             
@@ -210,6 +269,7 @@ void publishAlarmZone(int ix){
 }
   
 void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr){
+  if (!isMqttConnected()) return;
   String output;  
   StaticJsonDocument<mqttMaxPacketSize> doc;
       doc["client"]         = mqtt_client;
@@ -225,6 +285,7 @@ void publishSytemDisarmed(unsigned char whoDisarmed, const char* whoDisarmedStr)
   doc.clear();
 }
 void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned char armType, const char* armTypeStr){
+  if (!isMqttConnected()) return;
   String output;  
   StaticJsonDocument<mqttMaxPacketSize> doc;
       doc["client"]         = mqtt_client;
@@ -243,6 +304,7 @@ void publishSytemArmed( unsigned char whoArmed, const char* whoArmedStr,unsigned
 }
 
 void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsigned char zoneTripped, const char* zoneTrippedStr){
+  if (!isMqttConnected()) return;
   String output;  
   StaticJsonDocument<mqttMaxPacketSize> doc;
       doc["client"]         = mqtt_client;
@@ -262,6 +324,7 @@ void publishAlarmStarted(unsigned char alarmType, const char* alarmTypeStr, unsi
 }
 
 void publishAlarmCancelled(unsigned char whoDisarmed, const char* whoDisarmedStr){
+  if (!isMqttConnected()) return;
   String output;  
   StaticJsonDocument<mqttMaxPacketSize> doc;
       doc["client"]         = mqtt_client;

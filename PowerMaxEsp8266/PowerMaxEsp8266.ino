@@ -55,11 +55,28 @@ int doReboot = 0;
 WiFiClient wifiClientMQTT;
 WiFiManager wifiManager;
 PubSubClient clientMqtt(wifiClientMQTT);
-unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE  (50)
 char msg[MSG_BUFFER_SIZE];
-int value = 0;
  byte mac[6];
+
+// --- Reliability: MQTT reconnection with exponential backoff ---
+unsigned long mqttLastReconnectAttempt = 0;
+unsigned long mqttReconnectInterval = 5000;  // start at 5s, max 60s
+#define MQTT_RECONNECT_MAX_INTERVAL 60000
+
+// --- Reliability: WiFi monitoring ---
+unsigned long wifiLastCheck = 0;
+#define WIFI_CHECK_INTERVAL 30000  // check every 30s
+unsigned long wifiLostSince = 0;
+#define WIFI_REBOOT_TIMEOUT 300000 // reboot if WiFi lost > 5 min
+
+// --- Reliability: Heap monitoring ---
+#define HEAP_CRITICAL_THRESHOLD 4096 // reboot if free heap < 4KB
+unsigned long lastHeapCheck = 0;
+
+// --- Reliability: NTP periodic resync ---
+unsigned long lastNtpSync = 0;
+#define NTP_SYNC_INTERVAL 3600000 // resync every hour
 int logcount = -1;
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -70,6 +87,11 @@ char mqtt_user[40];
 char mqtt_pass[40];
 char mqtt_client[40] = "EspPowerMax";
 bool mqtt_retain = true;
+
+// --- MQTT LWT (Last Will and Testament) for Home Assistant availability ---
+#define MQTT_AVAILABILITY_TOPIC "powermax/availability"
+#define MQTT_LWT_ONLINE "online"
+#define MQTT_LWT_OFFLINE "offline"
 
 struct LogStruct
 {
@@ -218,8 +240,19 @@ public:
     
     virtual void OnStatusUpdatePanel(const PlinkBuffer  * Buff)    
     {
+        //save previous state to detect changes
+        SystemStatus prevStat = PowerMaxAlarm::stat;
+        unsigned char prevFlags = PowerMaxAlarm::flags;
+        
         //call base class implementation first, this will send ACK back and upate internal state.
         PowerMaxAlarm::OnStatusUpdatePanel(Buff);
+
+      //publish immediately if system status or flags changed
+      if (PowerMaxAlarm::stat != prevStat || PowerMaxAlarm::flags != prevFlags) {
+           addLog("Panel status changed: " + (String)GetStrPmaxSystemStatus(PowerMaxAlarm::stat));
+           publishAlarmFlags();
+           publishAlarmStat();
+      }
               
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
@@ -488,12 +521,8 @@ void addHeader(boolean showMenu, String& str)
     str += F("<button onclick=\"window.location.href='./status'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Status</button>");
     //str += F("<button onclick=\"window.location.href='./prueba.html'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Info</button>");
     str += F("<button onclick=\"window.location.href='./log'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Log</button>");
+    str += F("<button onclick=\"window.location.href='./mqttconfig'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-cog\" aria-hidden=\"true\"></span>&nbsp;MQTT Config</button>");
 
-
-
-
-
-    
     str += F("<button onclick=\"window.location.href='./reboot'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-repeat\" aria-hidden=\"true\"></span>&nbsp;Reboot</button>");  
 
     str += "<BR><BR>";
@@ -585,6 +614,85 @@ void handleNotFound(){
     server->send(404, "text/plain", "Not found");
 }
 
+void handleMqttConfig() {
+  String reply = "";
+  addHeader(true, reply);
+  reply += F("<h3>MQTT Configuration</h3>");
+  reply += F("<form method='POST' action='/mqttconfig/save'>");
+  reply += F("<div class='form-group'><label>MQTT Server</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_server' value='");
+  reply += mqtt_server;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Port</label>");
+  reply += F("<input type='number' class='form-control' name='mqtt_port' value='");
+  reply += mqtt_port;
+  reply += F("' maxlength='5'></div>");
+  reply += F("<div class='form-group'><label>MQTT User</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_user' value='");
+  reply += mqtt_user;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Password</label>");
+  reply += F("<input type='password' class='form-control' name='mqtt_pass' value='");
+  reply += mqtt_pass;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Client ID</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_client' value='");
+  reply += mqtt_client;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='checkbox'><label>");
+  reply += F("<input type='checkbox' name='mqtt_retain' value='true'");
+  if (mqtt_retain) reply += F(" checked");
+  reply += F("> Retain messages</label></div>");
+  reply += F("<button type='submit' class='btn btn-primary'>Save & Reconnect</button>");
+  reply += F("</form>");
+  reply += F("</html>");
+  server->send(200, "text/html", reply);
+}
+
+void handleMqttConfigSave() {
+  if (!server->hasArg("mqtt_server") || !server->hasArg("mqtt_port")) {
+    server->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+
+  // Copy new values with bounds checking
+  server->arg("mqtt_server").toCharArray(mqtt_server, sizeof(mqtt_server));
+  server->arg("mqtt_port").toCharArray(mqtt_port, sizeof(mqtt_port));
+  server->arg("mqtt_user").toCharArray(mqtt_user, sizeof(mqtt_user));
+  server->arg("mqtt_pass").toCharArray(mqtt_pass, sizeof(mqtt_pass));
+  server->arg("mqtt_client").toCharArray(mqtt_client, sizeof(mqtt_client));
+  mqtt_retain = server->hasArg("mqtt_retain");
+
+  // Save to SPIFFS
+  DynamicJsonDocument json(1024);
+  json["mqtt_server"] = mqtt_server;
+  json["mqtt_port"] = mqtt_port;
+  json["mqtt_user"] = mqtt_user;
+  json["mqtt_pass"] = mqtt_pass;
+  json["mqtt_client"] = mqtt_client;
+  json["mqtt_retain"] = mqtt_retain ? "true" : "false";
+
+  File configFile = SPIFFS.open("/config.json", "w");
+  if (!configFile) {
+    addLog("Failed to open config FS for writing");
+    server->send(500, "text/plain", "Failed to save config");
+    return;
+  }
+  serializeJson(json, configFile);
+  configFile.close();
+
+  addLog("MQTT config saved via web UI");
+
+  // Disconnect current MQTT and reconnect with new settings
+  clientMqtt.disconnect();
+  setupMqtt();
+  connectMqtt();
+
+  // Redirect back to config page
+  server->sendHeader("Location", "/mqttconfig", true);
+  server->send(302, "text/plain", "");
+}
+
 void setup(void){
  
   Serial.begin(9600);
@@ -667,19 +775,17 @@ void setup(void){
     server->streamFile(fileContent, "image/png");
     fileContent.close();    
   });
-  server->on("/config.json", [](){
-    File fileContent;
-    fileContent = SPIFFS.open("/config.json", "r");
-    server->streamFile(fileContent, "text/json");
-    fileContent.close();    
-  });
+  // config.json removed: exposes MQTT credentials publicly
+  // Access config via SPIFFS directly if needed for debugging
   server->on("/time", handleTime);
 
   server->on("/armaway", handleArmaway);
   server->on("/armhome", handleArmHome);
   server->on("/disarm", handleDisarm);
 
-  
+  server->on("/mqttconfig", HTTP_GET, handleMqttConfig);
+  server->on("/mqttconfig/save", HTTP_POST, handleMqttConfigSave);
+
   server->on("/log",    handleLog);
   server->on("/inline", [](){
     server->send(200, "text/plain", "this works as well");
@@ -705,6 +811,7 @@ void setup(void){
 WiFi.macAddress(mac);
 //mqtt_client = mqtt_client +"_"+ mac[2]+ mac[3]+ mac[4]+ mac[5];
 sprintf_P(mqtt_client,PSTR("EspPowerMax_%02X%02X%02X%02X"),mac[2], mac[3], mac[4], mac[5]);
+setupMqtt();
 connectMqtt();
   timeClient.begin();
     // Optionnal functionnalities of EspMQTTClient : 
@@ -1019,6 +1126,9 @@ bool serialHandler(PowerMaxAlarm* pm) {
 }
 
 void loop(void){
+  // --- Feed the software watchdog ---
+  ESP.wdtFeed();
+
 #ifdef PM_ENABLE_OTA_UPDATES
   ArduinoOTA.handle();
 #endif
@@ -1031,6 +1141,42 @@ void loop(void){
   if (doReboot > 100){
     ESP.restart();  
   }
+
+  // --- WiFi reconnection monitoring ---
+  unsigned long now_ms = millis();
+  if (now_ms - wifiLastCheck > WIFI_CHECK_INTERVAL) {
+    wifiLastCheck = now_ms;
+    if (WiFi.status() != WL_CONNECTED) {
+      if (wifiLostSince == 0) {
+        wifiLostSince = now_ms;
+        addLog("WiFi disconnected, attempting reconnect...");
+      }
+      WiFi.reconnect();
+      // If WiFi lost for too long, reboot
+      if (now_ms - wifiLostSince > WIFI_REBOOT_TIMEOUT) {
+        addLog("WiFi lost for >5min, rebooting...");
+        delay(100);
+        ESP.restart();
+      }
+    } else {
+      if (wifiLostSince != 0) {
+        addLog("WiFi reconnected, IP: " + WiFi.localIP().toString());
+        wifiLostSince = 0;
+      }
+    }
+  }
+
+  // --- Heap monitoring: reboot if critically low ---
+  if (now_ms - lastHeapCheck > 30000) {
+    lastHeapCheck = now_ms;
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < HEAP_CRITICAL_THRESHOLD) {
+      addLog("CRITICAL: Free heap " + String(freeHeap) + " < " + String(HEAP_CRITICAL_THRESHOLD) + ", rebooting...");
+      delay(100);
+      ESP.restart();
+    }
+  }
+
   static unsigned long lastMsg = 0;
   if(serialHandler(&pm) == true)
   {
@@ -1044,16 +1190,15 @@ void loop(void){
 
   if(pm.restoreCommsIfLost()) //if we fail to get PINGs from the alarm - we will attempt to restore the connection
   {
-    DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");  
-   // addLog( "Connection lost. Sending RESTORE request.");  
-    //Serial.println("Connection lost. Sending RESTORE request.");   
+    DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");
+    addLog("Alarm connection lost. Sending RESTORE request.");
   }   
 
 #ifdef PM_ENABLE_TELNET_ACCESS
   handleNewTelnetClients();
   handleTelnetRequests(&pm);
 #endif  
-      loopMQTT();
+  loopMQTT();
 
 }
 
@@ -1198,63 +1343,64 @@ void setTime(){
 //see PowerMaxAlarm::setDateTime for details of the parameters, if your OS does not have a RTC clock, simply return false
 bool os_getLocalTime(unsigned char& year, unsigned char& month, unsigned char& day, unsigned char& hour, unsigned char& minutes, unsigned char& seconds)
 {
+    // Return local time from NTP-synced TimeLib
+    time_t localTime = CE.toLocal(now());
+    if (localTime < 1000000) return false; // time not yet synced
 
- 
-  return false; //IZIZTODO
-  /*
-   // day =  getEpochStringByParams(CE.toLocal(now(),"%d"));
-    strcpy( (char*) year,    getEpochStringByParams(CE.toLocal(now()),"%y").c_str() );
-    strcpy( (char*) month,   getEpochStringByParams(CE.toLocal(now()),"%m").c_str() );
-    strcpy( (char*) day,     getEpochStringByParams(CE.toLocal(now()),"%d").c_str() );
-    strcpy( (char*) hour,    getEpochStringByParams(CE.toLocal(now()),"%H").c_str() );
-    strcpy( (char*) minutes, getEpochStringByParams(CE.toLocal(now()),"%M").c_str() );
-    strcpy( (char*) seconds, getEpochStringByParams(CE.toLocal(now()),"%S").c_str() );
-    return true; //IZIZTODO
-    //return false; //IZIZTODO
-    */
+    year    = (unsigned char) getEpochStringByParams(localTime, "%y").toInt();
+    month   = (unsigned char) getEpochStringByParams(localTime, "%m").toInt();
+    day     = (unsigned char) getEpochStringByParams(localTime, "%d").toInt();
+    hour    = (unsigned char) getEpochStringByParams(localTime, "%H").toInt();
+    minutes = (unsigned char) getEpochStringByParams(localTime, "%M").toInt();
+    seconds = (unsigned char) getEpochStringByParams(localTime, "%S").toInt();
+    return true;
 }
 
 
 
 boolean loopMQTT(){
+  unsigned long currentMillis = millis();
 
-  if (strcmp(mqtt_server,"none")!=0){
-       if (!clientMqtt.connected()) {
-        connectMqtt();
-    
-        if (clientMqtt.connect(mqtt_client)) {
-           addLog("Mqtt connected");
-        } else {
-          addLog("Mqtt failed connection "+(String)clientMqtt.state());
-          return false;
-        }
-        
-      }
-      clientMqtt.loop();
-    }  
- unsigned long currentMillis = millis();
+  if (!isMqttConfigured()) return false;
 
- //clientMqtt.loop();//mqttLoop
- 
-    if(currentMillis - prevMqtt > intervalMqtt ) {
-   
-     prevMqtt = currentMillis;   
-     if (strcmp(mqtt_server,"none")!=0 and clientMqtt.connected() ){
-       publishAlarmStat();     
-       publishAlarmFlags();  
-       publishAlarmZones();
-     }
-      if (timeClient.update()){
-       
-         unsigned long epoch = timeClient.getEpochTime();
-         setTime(epoch);
-      }else{
-          
+  // --- MQTT reconnection with exponential backoff ---
+  if (!clientMqtt.connected()) {
+    if (currentMillis - mqttLastReconnectAttempt > mqttReconnectInterval) {
+      mqttLastReconnectAttempt = currentMillis;
+      if (connectMqtt()) {
+        // Publish full state on reconnection
+        publishAlarmStat();
+        publishAlarmFlags();
+        publishAlarmZones();
       }
-      DEBUG(LOG_INFO,"MQTT loop");
     }
+    return false;
+  }
 
-   return true;     
+  // --- MQTT loop (must be called frequently) ---
+  clientMqtt.loop();
+
+  // --- Periodic status publish ---
+  if (currentMillis - prevMqtt > intervalMqtt) {
+    prevMqtt = currentMillis;
+    publishAlarmStat();
+    publishAlarmFlags();
+    publishAlarmZones();
+    DEBUG(LOG_INFO, "MQTT periodic publish");
+  }
+
+  // --- Periodic NTP resync ---
+  if (currentMillis - lastNtpSync > NTP_SYNC_INTERVAL) {
+    lastNtpSync = currentMillis;
+    if (timeClient.update()) {
+      setTime(timeClient.getEpochTime());
+      addLog("NTP resync OK: " + getEpochStringByParams(CE.toLocal(now())));
+    } else {
+      addLog("NTP resync failed");
+    }
+  }
+
+  return true;
 }
 
  
