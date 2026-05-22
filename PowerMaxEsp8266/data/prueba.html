@@ -3,6 +3,7 @@
  <thead style="background-color:#797b7d">
  <th>id</th>
  <th>Name</th>
+ <th>State</th>
  <th>Type</th>
  <th>Battery</th>
  <th>Active</th>
@@ -25,6 +26,23 @@
 </table>
 
 <script>
+
+	function inferSensorClass(sensorType, zoneTypeStr) {
+		// sensorType from the panel is unreliable (returns 'Magnet' for most sensors).
+		// Only keep it for types that zoneType cannot convey.
+		if (sensorType && sensorType !== 'Magnet' && sensorType !== 'Unknown') {
+			return sensorType;
+		}
+		if (!zoneTypeStr) return sensorType || 'Unknown';
+		var z = zoneTypeStr.toLowerCase();
+		if (z.indexOf('interior') >= 0) return 'Motion';
+		if (z.indexOf('perimeter') >= 0) return 'Contact';
+		if (z.indexOf('delay') >= 0) return 'Door';
+		if (z.indexOf('fire') >= 0) return 'Smoke';
+		if (z.indexOf('flood') >= 0) return 'Flood';
+		if (z.indexOf('gas') >= 0) return 'Gas';
+		return sensorType || zoneTypeStr;
+	}
 
 	function handleData(key, value){
 	var zoneId = key+1;
@@ -56,12 +74,21 @@
 	}
 
 
+	var sensorClass = inferSensorClass(value['sensorType'], value['zoneTypeStr']);
+	var zoneState;
+	if (sensorClass === 'Motion') {
+		zoneState = value['stat_doorOpen'] ? "<span style='color:red'>Motion</span>" : "<span style='color:green'>Clear</span>";
+	} else {
+		zoneState = value['stat_doorOpen'] ? "<span style='color:red'>Open</span>" : "<span style='color:green'>Closed</span>";
+	}
+
 	var html= "<tr><td>"+zoneId+"</td>"+
 			  "<td>"+value['zoneName']+"</td>"+
+			  "<td align=\"center\">"+zoneState+"</td>"+
 			  "<td align=\"center\">"+zoneTypeString+"</td>"+
 			  "<td align=\"center\">"+battIcon+"</td>"+
 			  "<td align=\"center\">"+value['stat_active']+"</td>"+
-			  "<td align=\"center\">"+value['sensorType']+"</td>"+
+			  "<td align=\"center\">"+inferSensorClass(value['sensorType'], value['zoneTypeStr'])+"</td>"+
 			  "<td align=\"center\">"+lastEventAge+"</td>"+
 			  "<td align=\"center\">"+value['stat_tamper']+"</td>"+
 			  "</tr>";
