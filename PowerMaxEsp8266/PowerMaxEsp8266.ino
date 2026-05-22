@@ -87,11 +87,39 @@ char mqtt_user[40];
 char mqtt_pass[40];
 char mqtt_client[40] = "EspPowerMax";
 bool mqtt_retain = true;
+char ha_code[10] = "";
 
 // --- MQTT LWT (Last Will and Testament) for Home Assistant availability ---
 #define MQTT_AVAILABILITY_TOPIC "powermax/availability"
 #define MQTT_LWT_ONLINE "online"
 #define MQTT_LWT_OFFLINE "offline"
+
+// --- Home Assistant MQTT Auto-Discovery ---
+#define HA_DISCOVERY_PREFIX "homeassistant"
+#define HA_ALARM_STATE_TOPIC "powermax/alarm_state"
+unsigned long lastHADiscovery = 0;
+#define HA_DISCOVERY_INTERVAL 1800000  // re-publish discovery every 30 min
+bool haDiscoveryPublished = false;
+bool pmConfigWasReady = false;   // detect transition: config not ready → ready
+
+// --- Deferred publish: never do MQTT I/O inside serial handler callbacks ---
+volatile bool deferredPublishStatFlags = false;
+volatile unsigned char deferredPublishSingleZone = 0; // 0 = none, >0 = zone id
+volatile bool deferredPublishAllZones = false;
+
+// --- Staggered zone publishing: one zone per loop() iteration ---
+int staggeredZoneIndex = 0;           // 0 = idle, 1..MAX_ZONE_COUNT-1 = next zone to publish
+bool staggeredZoneActive = false;     // true when a staggered sweep is in progress
+
+// --- Staggered HA discovery: one item per loop() iteration ---
+int haDiscoveryStep = 0;              // 0 = idle, >0 = step in progress
+bool haDiscoveryInProgress = false;
+
+// --- Reliability: Serial comm health monitoring ---
+unsigned long lastSerialCommOk = 0;
+#define SERIAL_COMM_WARN_INTERVAL 120000
+#define SERIAL_COMM_RESTORE_INTERVAL 180000
+bool serialCommWarned = false;
 
 struct LogStruct
 {
@@ -249,19 +277,42 @@ public:
 
       //publish immediately if system status or flags changed
       if (PowerMaxAlarm::stat != prevStat || PowerMaxAlarm::flags != prevFlags) {
-           addLog("Panel status changed: " + (String)GetStrPmaxSystemStatus(PowerMaxAlarm::stat));
-           publishAlarmFlags();
-           publishAlarmStat();
+           if (PowerMaxAlarm::stat != prevStat) {
+             addLog("Panel status changed: " + (String)GetStrPmaxSystemStatus(PowerMaxAlarm::stat));
+           }
+           deferredPublishStatFlags = true;
       }
               
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
-           addLog("Zone: "+(String)zoneId+" Name: "+this->getZoneName(zoneId));
-           publishAlarmZone(zoneId);
-           
-           
+
+           // pmax lib does not set doorOpen for PIR sensors (ZE_Violated/ZE_NotActive).
+           // We unify both sensor types under stat.doorOpen so MQTT/HA works for all.
+           if (eventType == ZE_Violated) {
+             PowerMaxAlarm::zone[zoneId].stat.doorOpen = true;
+           } else if (eventType == ZE_NotActive) {
+             PowerMaxAlarm::zone[zoneId].stat.doorOpen = false;
+           }
+
+           addLog("Zone " + String(zoneId) + " (" + this->getZoneName(zoneId) + "): " + this->GetStrPmaxZoneEventTypes(eventType));
+           deferredPublishSingleZone = zoneId;
       }
+    }
+
+    // Called when the panel sends a full zone open/closed + battery bitmap (A5-0x02).
+    // We defer publishing to main loop to avoid blocking serial reads.
+    virtual void OnStatusUpdateZoneBat(const PlinkBuffer* Buff)
+    {
+        PowerMaxAlarm::OnStatusUpdateZoneBat(Buff);
+
+        for (int i = 1; i < MAX_ZONE_COUNT; i++) {
+            if (PowerMaxAlarm::zone[i].enrolled && PowerMaxAlarm::zone[i].lastEvent == ZE_None) {
+                PowerMaxAlarm::zone[i].lastEvent = PowerMaxAlarm::zone[i].stat.doorOpen ? ZE_Open : ZE_Closed;
+            }
+        }
+
+        deferredPublishAllZones = true; // will start staggered sweep from main loop
     }
  
     
@@ -451,21 +502,18 @@ void handleLog() {
 
   if (logcount != -1)
   {
-    byte counter = logcount;
-    do
-    {
-      counter++;
-      if (counter > 20)
-        counter = 0;
-      if (Logging[counter].timeStamp > 0)
-      {
+    // Circular buffer: show newest entries first
+    for (int i = 0; i < 21; i++) {
+      int idx = (int)logcount - i;
+      while (idx < 0) idx += 21;
+      if (Logging[idx].timeStamp > 0) {
         reply += "<tr><td>";
-        reply += Logging[counter].formatedTime;
+        reply += Logging[idx].formatedTime;
         reply += "</td><td>";
-        reply += Logging[counter].Message;
+        reply += Logging[idx].Message;
         reply += F("</td></tr>");
       }
-    }  while (counter != logcount);
+    }
   }
   reply += F(" </tbody></table></div>");
   
@@ -639,6 +687,10 @@ void handleMqttConfig() {
   reply += F("<input type='text' class='form-control' name='mqtt_client' value='");
   reply += mqtt_client;
   reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>Home Assistant Code (local, never sent via MQTT)</label>");
+  reply += F("<input type='text' class='form-control' name='ha_code' value='");
+  reply += ha_code;
+  reply += F("' maxlength='9' placeholder='e.g. 1234'></div>");
   reply += F("<div class='checkbox'><label>");
   reply += F("<input type='checkbox' name='mqtt_retain' value='true'");
   if (mqtt_retain) reply += F(" checked");
@@ -661,6 +713,7 @@ void handleMqttConfigSave() {
   server->arg("mqtt_user").toCharArray(mqtt_user, sizeof(mqtt_user));
   server->arg("mqtt_pass").toCharArray(mqtt_pass, sizeof(mqtt_pass));
   server->arg("mqtt_client").toCharArray(mqtt_client, sizeof(mqtt_client));
+  server->arg("ha_code").toCharArray(ha_code, sizeof(ha_code));
   mqtt_retain = server->hasArg("mqtt_retain");
 
   // Save to SPIFFS
@@ -670,6 +723,7 @@ void handleMqttConfigSave() {
   json["mqtt_user"] = mqtt_user;
   json["mqtt_pass"] = mqtt_pass;
   json["mqtt_client"] = mqtt_client;
+  json["ha_code"] = ha_code;
   json["mqtt_retain"] = mqtt_retain ? "true" : "false";
 
   File configFile = SPIFFS.open("/config.json", "w");
@@ -1181,6 +1235,8 @@ void loop(void){
   if(serialHandler(&pm) == true)
   {
     lastMsg = millis();
+    lastSerialCommOk = now_ms;
+    serialCommWarned = false;
   }
 
   if(millis() - lastMsg > 300 || millis() < lastMsg) //we ensure a small delay between commands, as it can confuse the alarm (it has a slow CPU)
@@ -1192,12 +1248,94 @@ void loop(void){
   {
     DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");
     addLog("Alarm connection lost. Sending RESTORE request.");
-  }   
+  }
+
+  // --- Serial comm health monitoring ---
+  if (lastSerialCommOk > 0) {
+    unsigned long silentMs = now_ms - lastSerialCommOk;
+    if (silentMs > SERIAL_COMM_WARN_INTERVAL && !serialCommWarned) {
+      serialCommWarned = true;
+      addLog("WARNING: No serial data from alarm for " + String(silentMs / 1000) + "s");
+    }
+    if (silentMs > SERIAL_COMM_RESTORE_INTERVAL && serialCommWarned) {
+      addLog("Forcing RESTORE + REQSTATUS after " + String(silentMs / 1000) + "s silence");
+      pm.sendCommand(Pmax_RESTORE);
+      pm.sendCommand(Pmax_REQSTATUS);
+      lastSerialCommOk = now_ms; // reset to avoid spamming
+      serialCommWarned = false;
+    }
+  }
 
 #ifdef PM_ENABLE_TELNET_ACCESS
   handleNewTelnetClients();
   handleTelnetRequests(&pm);
 #endif  
+
+  // --- Process deferred MQTT publishes (set by serial handler callbacks) ---
+  // These are lightweight: 1-2 MQTT messages max, safe to do here.
+  if (deferredPublishStatFlags) {
+    deferredPublishStatFlags = false;
+    publishAlarmFlags();
+    publishAlarmStat();
+    publishAlarmStateHA();
+  }
+  if (deferredPublishSingleZone > 0) {
+    unsigned char zid = deferredPublishSingleZone;
+    deferredPublishSingleZone = 0;
+    publishAlarmZone(zid);
+    publishAlarmStateHA();
+  }
+  // Start a staggered sweep if requested
+  if (deferredPublishAllZones) {
+    deferredPublishAllZones = false;
+    staggeredZoneIndex = 1;
+    staggeredZoneActive = true;
+  }
+
+  // --- Staggered zone publishing: publish ONE zone per loop() iteration ---
+  if (staggeredZoneActive && staggeredZoneIndex > 0 && staggeredZoneIndex < MAX_ZONE_COUNT) {
+    Zone z = pm.getAlarmZone(staggeredZoneIndex);
+    if (z.enrolled) {
+      publishAlarmZone(staggeredZoneIndex);
+    }
+    staggeredZoneIndex++;
+    if (staggeredZoneIndex >= MAX_ZONE_COUNT) {
+      staggeredZoneActive = false;
+      staggeredZoneIndex = 0;
+    }
+  }
+
+  // --- Staggered HA discovery: publish ONE discovery item per loop() iteration ---
+  if (haDiscoveryInProgress && haDiscoveryStep > 0) {
+    if (haDiscoveryStep == 1) {
+      publishHADiscoveryAlarmPanel();
+      haDiscoveryStep = 2;
+    } else if (haDiscoveryStep == 2) {
+      publishHADiscoveryDiagnostics();
+      haDiscoveryStep = 3; // start zone discovery from zone 1
+    } else {
+      // Steps 3..3+MAX_ZONE_COUNT = one zone each
+      int zoneIx = haDiscoveryStep - 2; // step 3 = zone 1, step 4 = zone 2, etc.
+      if (zoneIx < MAX_ZONE_COUNT) {
+        Zone z = pm.getAlarmZone(zoneIx);
+        if (z.enrolled) {
+          publishHADiscoveryZone(zoneIx);
+        }
+        haDiscoveryStep++;
+      } else {
+        // All done
+        haDiscoveryInProgress = false;
+        haDiscoveryStep = 0;
+        haDiscoveryPublished = true;
+        lastHADiscovery = millis();
+        addLog("HA Auto-Discovery published (staggered)");
+        // Start a staggered zone publish to push current states
+        staggeredZoneIndex = 1;
+        staggeredZoneActive = true;
+      }
+    }
+  }
+
   loopMQTT();
 
 }
@@ -1365,13 +1503,16 @@ boolean loopMQTT(){
 
   // --- MQTT reconnection with exponential backoff ---
   if (!clientMqtt.connected()) {
+    haDiscoveryPublished = false; // force re-publish on reconnect
+    pmConfigWasReady = false;     // re-check config readiness after reconnect
     if (currentMillis - mqttLastReconnectAttempt > mqttReconnectInterval) {
       mqttLastReconnectAttempt = currentMillis;
       if (connectMqtt()) {
-        // Publish full state on reconnection
+        // On reconnect: publish stat/flags (lightweight) and start staggered zone sweep
         publishAlarmStat();
         publishAlarmFlags();
-        publishAlarmZones();
+        staggeredZoneIndex = 1;
+        staggeredZoneActive = true;
       }
     }
     return false;
@@ -1380,12 +1521,40 @@ boolean loopMQTT(){
   // --- MQTT loop (must be called frequently) ---
   clientMqtt.loop();
 
-  // --- Periodic status publish ---
+  // --- HA Auto-Discovery: only publish once alarm config is downloaded ---
+  bool pmNowReady = pm.isConfigParsed();
+  if (pmNowReady && !pmConfigWasReady) {
+    haDiscoveryPublished = false;
+    addLog("Alarm config ready, triggering HA discovery");
+    pm.sendCommand(Pmax_REQSTATUS);
+  }
+  pmConfigWasReady = pmNowReady;
+
+  if (pmNowReady) {
+    if (!haDiscoveryPublished && !haDiscoveryInProgress) {
+      // Start staggered discovery
+      haDiscoveryInProgress = true;
+      haDiscoveryStep = 1;
+      addLog("Starting staggered HA discovery...");
+    }
+    // Periodic re-publish of discovery
+    if (haDiscoveryPublished && (currentMillis - lastHADiscovery > HA_DISCOVERY_INTERVAL)) {
+      haDiscoveryInProgress = true;
+      haDiscoveryStep = 1;
+      haDiscoveryPublished = false;
+    }
+  }
+
+  // --- Periodic status publish (stat + flags only; zones via staggered sweep) ---
   if (currentMillis - prevMqtt > intervalMqtt) {
     prevMqtt = currentMillis;
     publishAlarmStat();
     publishAlarmFlags();
-    publishAlarmZones();
+    // Start a staggered zone sweep instead of burst
+    if (!staggeredZoneActive) {
+      staggeredZoneIndex = 1;
+      staggeredZoneActive = true;
+    }
     DEBUG(LOG_INFO, "MQTT periodic publish");
   }
 
