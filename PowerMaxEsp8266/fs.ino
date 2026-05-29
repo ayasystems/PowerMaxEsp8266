@@ -84,6 +84,7 @@ wifiManager.autoConnect();
     json["mqtt_user"] = mqtt_user;
     json["mqtt_pass"] = mqtt_pass;
     json["mqtt_client"] = mqtt_client;
+    json["ha_code"] = ha_code;
     json["mqtt_retain"] = mqtt_retain ? "true" : "false";
 
     File configFile = SPIFFS.open("/config.json", "w");
@@ -144,6 +145,9 @@ void createFS(){
               if (json.containsKey("mqtt_retain")) {
                 const char* retain_str = json["mqtt_retain"];
                 mqtt_retain = (strcmp(retain_str, "true") == 0);
+              }
+              if (json.containsKey("ha_code")) {
+                strcpy(ha_code, json["ha_code"]);
               }
               
               char jsonLog[1024];

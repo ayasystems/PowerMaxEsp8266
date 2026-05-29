@@ -55,11 +55,28 @@ int doReboot = 0;
 WiFiClient wifiClientMQTT;
 WiFiManager wifiManager;
 PubSubClient clientMqtt(wifiClientMQTT);
-unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE  (50)
 char msg[MSG_BUFFER_SIZE];
-int value = 0;
  byte mac[6];
+
+// --- Reliability: MQTT reconnection with exponential backoff ---
+unsigned long mqttLastReconnectAttempt = 0;
+unsigned long mqttReconnectInterval = 5000;  // start at 5s, max 60s
+#define MQTT_RECONNECT_MAX_INTERVAL 60000
+
+// --- Reliability: WiFi monitoring ---
+unsigned long wifiLastCheck = 0;
+#define WIFI_CHECK_INTERVAL 30000  // check every 30s
+unsigned long wifiLostSince = 0;
+#define WIFI_REBOOT_TIMEOUT 300000 // reboot if WiFi lost > 5 min
+
+// --- Reliability: Heap monitoring ---
+#define HEAP_CRITICAL_THRESHOLD 4096 // reboot if free heap < 4KB
+unsigned long lastHeapCheck = 0;
+
+// --- Reliability: NTP periodic resync ---
+unsigned long lastNtpSync = 0;
+#define NTP_SYNC_INTERVAL 3600000 // resync every hour
 int logcount = -1;
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -70,6 +87,39 @@ char mqtt_user[40];
 char mqtt_pass[40];
 char mqtt_client[40] = "EspPowerMax";
 bool mqtt_retain = true;
+char ha_code[10] = "";
+
+// --- MQTT LWT (Last Will and Testament) for Home Assistant availability ---
+#define MQTT_AVAILABILITY_TOPIC "powermax/availability"
+#define MQTT_LWT_ONLINE "online"
+#define MQTT_LWT_OFFLINE "offline"
+
+// --- Home Assistant MQTT Auto-Discovery ---
+#define HA_DISCOVERY_PREFIX "homeassistant"
+#define HA_ALARM_STATE_TOPIC "powermax/alarm_state"
+unsigned long lastHADiscovery = 0;
+#define HA_DISCOVERY_INTERVAL 1800000  // re-publish discovery every 30 min
+bool haDiscoveryPublished = false;
+bool pmConfigWasReady = false;   // detect transition: config not ready → ready
+
+// --- Deferred publish: never do MQTT I/O inside serial handler callbacks ---
+volatile bool deferredPublishStatFlags = false;
+volatile unsigned char deferredPublishSingleZone = 0; // 0 = none, >0 = zone id
+volatile bool deferredPublishAllZones = false;
+
+// --- Staggered zone publishing: one zone per loop() iteration ---
+int staggeredZoneIndex = 0;           // 0 = idle, 1..MAX_ZONE_COUNT-1 = next zone to publish
+bool staggeredZoneActive = false;     // true when a staggered sweep is in progress
+
+// --- Staggered HA discovery: one item per loop() iteration ---
+int haDiscoveryStep = 0;              // 0 = idle, >0 = step in progress
+bool haDiscoveryInProgress = false;
+
+// --- Reliability: Serial comm health monitoring ---
+unsigned long lastSerialCommOk = 0;
+#define SERIAL_COMM_WARN_INTERVAL 120000
+#define SERIAL_COMM_RESTORE_INTERVAL 180000
+bool serialCommWarned = false;
 
 struct LogStruct
 {
@@ -218,17 +268,51 @@ public:
     
     virtual void OnStatusUpdatePanel(const PlinkBuffer  * Buff)    
     {
+        //save previous state to detect changes
+        SystemStatus prevStat = PowerMaxAlarm::stat;
+        unsigned char prevFlags = PowerMaxAlarm::flags;
+        
         //call base class implementation first, this will send ACK back and upate internal state.
         PowerMaxAlarm::OnStatusUpdatePanel(Buff);
+
+      //publish immediately if system status or flags changed
+      if (PowerMaxAlarm::stat != prevStat || PowerMaxAlarm::flags != prevFlags) {
+           if (PowerMaxAlarm::stat != prevStat) {
+             addLog("Panel status changed: " + (String)GetStrPmaxSystemStatus(PowerMaxAlarm::stat));
+           }
+           deferredPublishStatFlags = true;
+      }
               
       if (this->isZoneEvent()) {
            const unsigned char zoneId = Buff->buffer[5];
            ZoneEvent eventType = (ZoneEvent)Buff->buffer[6];
-           addLog("Zone: "+(String)zoneId+" Name: "+this->getZoneName(zoneId));
-           publishAlarmZone(zoneId);
-           
-           
+
+           // pmax lib does not set doorOpen for PIR sensors (ZE_Violated/ZE_NotActive).
+           // We unify both sensor types under stat.doorOpen so MQTT/HA works for all.
+           if (eventType == ZE_Violated) {
+             PowerMaxAlarm::zone[zoneId].stat.doorOpen = true;
+           } else if (eventType == ZE_NotActive) {
+             PowerMaxAlarm::zone[zoneId].stat.doorOpen = false;
+           }
+
+           addLog("Zone " + String(zoneId) + " (" + this->getZoneName(zoneId) + "): " + this->GetStrPmaxZoneEventTypes(eventType));
+           deferredPublishSingleZone = zoneId;
       }
+    }
+
+    // Called when the panel sends a full zone open/closed + battery bitmap (A5-0x02).
+    // We defer publishing to main loop to avoid blocking serial reads.
+    virtual void OnStatusUpdateZoneBat(const PlinkBuffer* Buff)
+    {
+        PowerMaxAlarm::OnStatusUpdateZoneBat(Buff);
+
+        for (int i = 1; i < MAX_ZONE_COUNT; i++) {
+            if (PowerMaxAlarm::zone[i].enrolled && PowerMaxAlarm::zone[i].lastEvent == ZE_None) {
+                PowerMaxAlarm::zone[i].lastEvent = PowerMaxAlarm::zone[i].stat.doorOpen ? ZE_Open : ZE_Closed;
+            }
+        }
+
+        deferredPublishAllZones = true; // will start staggered sweep from main loop
     }
  
     
@@ -418,21 +502,18 @@ void handleLog() {
 
   if (logcount != -1)
   {
-    byte counter = logcount;
-    do
-    {
-      counter++;
-      if (counter > 20)
-        counter = 0;
-      if (Logging[counter].timeStamp > 0)
-      {
+    // Circular buffer: show newest entries first
+    for (int i = 0; i < 21; i++) {
+      int idx = (int)logcount - i;
+      while (idx < 0) idx += 21;
+      if (Logging[idx].timeStamp > 0) {
         reply += "<tr><td>";
-        reply += Logging[counter].formatedTime;
+        reply += Logging[idx].formatedTime;
         reply += "</td><td>";
-        reply += Logging[counter].Message;
+        reply += Logging[idx].Message;
         reply += F("</td></tr>");
       }
-    }  while (counter != logcount);
+    }
   }
   reply += F(" </tbody></table></div>");
   
@@ -488,12 +569,8 @@ void addHeader(boolean showMenu, String& str)
     str += F("<button onclick=\"window.location.href='./status'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Status</button>");
     //str += F("<button onclick=\"window.location.href='./prueba.html'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Info</button>");
     str += F("<button onclick=\"window.location.href='./log'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-refresh\" aria-hidden=\"true\"></span>&nbsp;Log</button>");
+    str += F("<button onclick=\"window.location.href='./mqttconfig'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-cog\" aria-hidden=\"true\"></span>&nbsp;MQTT Config</button>");
 
-
-
-
-
-    
     str += F("<button onclick=\"window.location.href='./reboot'\"  type=\"button\" class=\"btn btn-default navbar-btn\"><span class=\"glyphicon glyphicon-repeat\" aria-hidden=\"true\"></span>&nbsp;Reboot</button>");  
 
     str += "<BR><BR>";
@@ -585,6 +662,91 @@ void handleNotFound(){
     server->send(404, "text/plain", "Not found");
 }
 
+void handleMqttConfig() {
+  String reply = "";
+  addHeader(true, reply);
+  reply += F("<h3>MQTT Configuration</h3>");
+  reply += F("<form method='POST' action='/mqttconfig/save'>");
+  reply += F("<div class='form-group'><label>MQTT Server</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_server' value='");
+  reply += mqtt_server;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Port</label>");
+  reply += F("<input type='number' class='form-control' name='mqtt_port' value='");
+  reply += mqtt_port;
+  reply += F("' maxlength='5'></div>");
+  reply += F("<div class='form-group'><label>MQTT User</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_user' value='");
+  reply += mqtt_user;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Password</label>");
+  reply += F("<input type='password' class='form-control' name='mqtt_pass' value='");
+  reply += mqtt_pass;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>MQTT Client ID</label>");
+  reply += F("<input type='text' class='form-control' name='mqtt_client' value='");
+  reply += mqtt_client;
+  reply += F("' maxlength='39'></div>");
+  reply += F("<div class='form-group'><label>Home Assistant Code (local, never sent via MQTT)</label>");
+  reply += F("<input type='text' class='form-control' name='ha_code' value='");
+  reply += ha_code;
+  reply += F("' maxlength='9' placeholder='e.g. 1234'></div>");
+  reply += F("<div class='checkbox'><label>");
+  reply += F("<input type='checkbox' name='mqtt_retain' value='true'");
+  if (mqtt_retain) reply += F(" checked");
+  reply += F("> Retain messages</label></div>");
+  reply += F("<button type='submit' class='btn btn-primary'>Save & Reconnect</button>");
+  reply += F("</form>");
+  reply += F("</html>");
+  server->send(200, "text/html", reply);
+}
+
+void handleMqttConfigSave() {
+  if (!server->hasArg("mqtt_server") || !server->hasArg("mqtt_port")) {
+    server->send(400, "text/plain", "Missing parameters");
+    return;
+  }
+
+  // Copy new values with bounds checking
+  server->arg("mqtt_server").toCharArray(mqtt_server, sizeof(mqtt_server));
+  server->arg("mqtt_port").toCharArray(mqtt_port, sizeof(mqtt_port));
+  server->arg("mqtt_user").toCharArray(mqtt_user, sizeof(mqtt_user));
+  server->arg("mqtt_pass").toCharArray(mqtt_pass, sizeof(mqtt_pass));
+  server->arg("mqtt_client").toCharArray(mqtt_client, sizeof(mqtt_client));
+  server->arg("ha_code").toCharArray(ha_code, sizeof(ha_code));
+  mqtt_retain = server->hasArg("mqtt_retain");
+
+  // Save to SPIFFS
+  DynamicJsonDocument json(1024);
+  json["mqtt_server"] = mqtt_server;
+  json["mqtt_port"] = mqtt_port;
+  json["mqtt_user"] = mqtt_user;
+  json["mqtt_pass"] = mqtt_pass;
+  json["mqtt_client"] = mqtt_client;
+  json["ha_code"] = ha_code;
+  json["mqtt_retain"] = mqtt_retain ? "true" : "false";
+
+  File configFile = SPIFFS.open("/config.json", "w");
+  if (!configFile) {
+    addLog("Failed to open config FS for writing");
+    server->send(500, "text/plain", "Failed to save config");
+    return;
+  }
+  serializeJson(json, configFile);
+  configFile.close();
+
+  addLog("MQTT config saved via web UI");
+
+  // Disconnect current MQTT and reconnect with new settings
+  clientMqtt.disconnect();
+  setupMqtt();
+  connectMqtt();
+
+  // Redirect back to config page
+  server->sendHeader("Location", "/mqttconfig", true);
+  server->send(302, "text/plain", "");
+}
+
 void setup(void){
  
   Serial.begin(9600);
@@ -667,19 +829,17 @@ void setup(void){
     server->streamFile(fileContent, "image/png");
     fileContent.close();    
   });
-  server->on("/config.json", [](){
-    File fileContent;
-    fileContent = SPIFFS.open("/config.json", "r");
-    server->streamFile(fileContent, "text/json");
-    fileContent.close();    
-  });
+  // config.json removed: exposes MQTT credentials publicly
+  // Access config via SPIFFS directly if needed for debugging
   server->on("/time", handleTime);
 
   server->on("/armaway", handleArmaway);
   server->on("/armhome", handleArmHome);
   server->on("/disarm", handleDisarm);
 
-  
+  server->on("/mqttconfig", HTTP_GET, handleMqttConfig);
+  server->on("/mqttconfig/save", HTTP_POST, handleMqttConfigSave);
+
   server->on("/log",    handleLog);
   server->on("/inline", [](){
     server->send(200, "text/plain", "this works as well");
@@ -705,6 +865,7 @@ void setup(void){
 WiFi.macAddress(mac);
 //mqtt_client = mqtt_client +"_"+ mac[2]+ mac[3]+ mac[4]+ mac[5];
 sprintf_P(mqtt_client,PSTR("EspPowerMax_%02X%02X%02X%02X"),mac[2], mac[3], mac[4], mac[5]);
+setupMqtt();
 connectMqtt();
   timeClient.begin();
     // Optionnal functionnalities of EspMQTTClient : 
@@ -1019,6 +1180,9 @@ bool serialHandler(PowerMaxAlarm* pm) {
 }
 
 void loop(void){
+  // --- Feed the software watchdog ---
+  ESP.wdtFeed();
+
 #ifdef PM_ENABLE_OTA_UPDATES
   ArduinoOTA.handle();
 #endif
@@ -1031,10 +1195,48 @@ void loop(void){
   if (doReboot > 100){
     ESP.restart();  
   }
+
+  // --- WiFi reconnection monitoring ---
+  unsigned long now_ms = millis();
+  if (now_ms - wifiLastCheck > WIFI_CHECK_INTERVAL) {
+    wifiLastCheck = now_ms;
+    if (WiFi.status() != WL_CONNECTED) {
+      if (wifiLostSince == 0) {
+        wifiLostSince = now_ms;
+        addLog("WiFi disconnected, attempting reconnect...");
+      }
+      WiFi.reconnect();
+      // If WiFi lost for too long, reboot
+      if (now_ms - wifiLostSince > WIFI_REBOOT_TIMEOUT) {
+        addLog("WiFi lost for >5min, rebooting...");
+        delay(100);
+        ESP.restart();
+      }
+    } else {
+      if (wifiLostSince != 0) {
+        addLog("WiFi reconnected, IP: " + WiFi.localIP().toString());
+        wifiLostSince = 0;
+      }
+    }
+  }
+
+  // --- Heap monitoring: reboot if critically low ---
+  if (now_ms - lastHeapCheck > 30000) {
+    lastHeapCheck = now_ms;
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < HEAP_CRITICAL_THRESHOLD) {
+      addLog("CRITICAL: Free heap " + String(freeHeap) + " < " + String(HEAP_CRITICAL_THRESHOLD) + ", rebooting...");
+      delay(100);
+      ESP.restart();
+    }
+  }
+
   static unsigned long lastMsg = 0;
   if(serialHandler(&pm) == true)
   {
     lastMsg = millis();
+    lastSerialCommOk = now_ms;
+    serialCommWarned = false;
   }
 
   if(millis() - lastMsg > 300 || millis() < lastMsg) //we ensure a small delay between commands, as it can confuse the alarm (it has a slow CPU)
@@ -1044,16 +1246,97 @@ void loop(void){
 
   if(pm.restoreCommsIfLost()) //if we fail to get PINGs from the alarm - we will attempt to restore the connection
   {
-    DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");  
-   // addLog( "Connection lost. Sending RESTORE request.");  
-    //Serial.println("Connection lost. Sending RESTORE request.");   
-  }   
+    DEBUG(LOG_WARNING,"Connection lost. Sending RESTORE request.");
+    addLog("Alarm connection lost. Sending RESTORE request.");
+  }
+
+  // --- Serial comm health monitoring ---
+  if (lastSerialCommOk > 0) {
+    unsigned long silentMs = now_ms - lastSerialCommOk;
+    if (silentMs > SERIAL_COMM_WARN_INTERVAL && !serialCommWarned) {
+      serialCommWarned = true;
+      addLog("WARNING: No serial data from alarm for " + String(silentMs / 1000) + "s");
+    }
+    if (silentMs > SERIAL_COMM_RESTORE_INTERVAL && serialCommWarned) {
+      addLog("Forcing RESTORE + REQSTATUS after " + String(silentMs / 1000) + "s silence");
+      pm.sendCommand(Pmax_RESTORE);
+      pm.sendCommand(Pmax_REQSTATUS);
+      lastSerialCommOk = now_ms; // reset to avoid spamming
+      serialCommWarned = false;
+    }
+  }
 
 #ifdef PM_ENABLE_TELNET_ACCESS
   handleNewTelnetClients();
   handleTelnetRequests(&pm);
 #endif  
-      loopMQTT();
+
+  // --- Process deferred MQTT publishes (set by serial handler callbacks) ---
+  // These are lightweight: 1-2 MQTT messages max, safe to do here.
+  if (deferredPublishStatFlags) {
+    deferredPublishStatFlags = false;
+    publishAlarmFlags();
+    publishAlarmStat();
+    publishAlarmStateHA();
+  }
+  if (deferredPublishSingleZone > 0) {
+    unsigned char zid = deferredPublishSingleZone;
+    deferredPublishSingleZone = 0;
+    publishAlarmZone(zid);
+    publishAlarmStateHA();
+  }
+  // Start a staggered sweep if requested
+  if (deferredPublishAllZones) {
+    deferredPublishAllZones = false;
+    staggeredZoneIndex = 1;
+    staggeredZoneActive = true;
+  }
+
+  // --- Staggered zone publishing: publish ONE zone per loop() iteration ---
+  if (staggeredZoneActive && staggeredZoneIndex > 0 && staggeredZoneIndex < MAX_ZONE_COUNT) {
+    Zone z = pm.getAlarmZone(staggeredZoneIndex);
+    if (z.enrolled) {
+      publishAlarmZone(staggeredZoneIndex);
+    }
+    staggeredZoneIndex++;
+    if (staggeredZoneIndex >= MAX_ZONE_COUNT) {
+      staggeredZoneActive = false;
+      staggeredZoneIndex = 0;
+    }
+  }
+
+  // --- Staggered HA discovery: publish ONE discovery item per loop() iteration ---
+  if (haDiscoveryInProgress && haDiscoveryStep > 0) {
+    if (haDiscoveryStep == 1) {
+      publishHADiscoveryAlarmPanel();
+      haDiscoveryStep = 2;
+    } else if (haDiscoveryStep == 2) {
+      publishHADiscoveryDiagnostics();
+      haDiscoveryStep = 3; // start zone discovery from zone 1
+    } else {
+      // Steps 3..3+MAX_ZONE_COUNT = one zone each
+      int zoneIx = haDiscoveryStep - 2; // step 3 = zone 1, step 4 = zone 2, etc.
+      if (zoneIx < MAX_ZONE_COUNT) {
+        Zone z = pm.getAlarmZone(zoneIx);
+        if (z.enrolled) {
+          publishHADiscoveryZone(zoneIx);
+        }
+        haDiscoveryStep++;
+      } else {
+        // All done
+        haDiscoveryInProgress = false;
+        haDiscoveryStep = 0;
+        haDiscoveryPublished = true;
+        lastHADiscovery = millis();
+        addLog("HA Auto-Discovery published (staggered)");
+        // Start a staggered zone publish to push current states
+        staggeredZoneIndex = 1;
+        staggeredZoneActive = true;
+      }
+    }
+  }
+
+  loopMQTT();
 
 }
 
@@ -1198,63 +1481,95 @@ void setTime(){
 //see PowerMaxAlarm::setDateTime for details of the parameters, if your OS does not have a RTC clock, simply return false
 bool os_getLocalTime(unsigned char& year, unsigned char& month, unsigned char& day, unsigned char& hour, unsigned char& minutes, unsigned char& seconds)
 {
+    // Return local time from NTP-synced TimeLib
+    time_t localTime = CE.toLocal(now());
+    if (localTime < 1000000) return false; // time not yet synced
 
- 
-  return false; //IZIZTODO
-  /*
-   // day =  getEpochStringByParams(CE.toLocal(now(),"%d"));
-    strcpy( (char*) year,    getEpochStringByParams(CE.toLocal(now()),"%y").c_str() );
-    strcpy( (char*) month,   getEpochStringByParams(CE.toLocal(now()),"%m").c_str() );
-    strcpy( (char*) day,     getEpochStringByParams(CE.toLocal(now()),"%d").c_str() );
-    strcpy( (char*) hour,    getEpochStringByParams(CE.toLocal(now()),"%H").c_str() );
-    strcpy( (char*) minutes, getEpochStringByParams(CE.toLocal(now()),"%M").c_str() );
-    strcpy( (char*) seconds, getEpochStringByParams(CE.toLocal(now()),"%S").c_str() );
-    return true; //IZIZTODO
-    //return false; //IZIZTODO
-    */
+    year    = (unsigned char) getEpochStringByParams(localTime, "%y").toInt();
+    month   = (unsigned char) getEpochStringByParams(localTime, "%m").toInt();
+    day     = (unsigned char) getEpochStringByParams(localTime, "%d").toInt();
+    hour    = (unsigned char) getEpochStringByParams(localTime, "%H").toInt();
+    minutes = (unsigned char) getEpochStringByParams(localTime, "%M").toInt();
+    seconds = (unsigned char) getEpochStringByParams(localTime, "%S").toInt();
+    return true;
 }
 
 
 
 boolean loopMQTT(){
+  unsigned long currentMillis = millis();
 
-  if (strcmp(mqtt_server,"none")!=0){
-       if (!clientMqtt.connected()) {
-        connectMqtt();
-    
-        if (clientMqtt.connect(mqtt_client)) {
-           addLog("Mqtt connected");
-        } else {
-          addLog("Mqtt failed connection "+(String)clientMqtt.state());
-          return false;
-        }
-        
-      }
-      clientMqtt.loop();
-    }  
- unsigned long currentMillis = millis();
+  if (!isMqttConfigured()) return false;
 
- //clientMqtt.loop();//mqttLoop
- 
-    if(currentMillis - prevMqtt > intervalMqtt ) {
-   
-     prevMqtt = currentMillis;   
-     if (strcmp(mqtt_server,"none")!=0 and clientMqtt.connected() ){
-       publishAlarmStat();     
-       publishAlarmFlags();  
-       publishAlarmZones();
-     }
-      if (timeClient.update()){
-       
-         unsigned long epoch = timeClient.getEpochTime();
-         setTime(epoch);
-      }else{
-          
+  // --- MQTT reconnection with exponential backoff ---
+  if (!clientMqtt.connected()) {
+    haDiscoveryPublished = false; // force re-publish on reconnect
+    pmConfigWasReady = false;     // re-check config readiness after reconnect
+    if (currentMillis - mqttLastReconnectAttempt > mqttReconnectInterval) {
+      mqttLastReconnectAttempt = currentMillis;
+      if (connectMqtt()) {
+        // On reconnect: publish stat/flags (lightweight) and start staggered zone sweep
+        publishAlarmStat();
+        publishAlarmFlags();
+        staggeredZoneIndex = 1;
+        staggeredZoneActive = true;
       }
-      DEBUG(LOG_INFO,"MQTT loop");
     }
+    return false;
+  }
 
-   return true;     
+  // --- MQTT loop (must be called frequently) ---
+  clientMqtt.loop();
+
+  // --- HA Auto-Discovery: only publish once alarm config is downloaded ---
+  bool pmNowReady = pm.isConfigParsed();
+  if (pmNowReady && !pmConfigWasReady) {
+    haDiscoveryPublished = false;
+    addLog("Alarm config ready, triggering HA discovery");
+    pm.sendCommand(Pmax_REQSTATUS);
+  }
+  pmConfigWasReady = pmNowReady;
+
+  if (pmNowReady) {
+    if (!haDiscoveryPublished && !haDiscoveryInProgress) {
+      // Start staggered discovery
+      haDiscoveryInProgress = true;
+      haDiscoveryStep = 1;
+      addLog("Starting staggered HA discovery...");
+    }
+    // Periodic re-publish of discovery
+    if (haDiscoveryPublished && (currentMillis - lastHADiscovery > HA_DISCOVERY_INTERVAL)) {
+      haDiscoveryInProgress = true;
+      haDiscoveryStep = 1;
+      haDiscoveryPublished = false;
+    }
+  }
+
+  // --- Periodic status publish (stat + flags only; zones via staggered sweep) ---
+  if (currentMillis - prevMqtt > intervalMqtt) {
+    prevMqtt = currentMillis;
+    publishAlarmStat();
+    publishAlarmFlags();
+    // Start a staggered zone sweep instead of burst
+    if (!staggeredZoneActive) {
+      staggeredZoneIndex = 1;
+      staggeredZoneActive = true;
+    }
+    DEBUG(LOG_INFO, "MQTT periodic publish");
+  }
+
+  // --- Periodic NTP resync ---
+  if (currentMillis - lastNtpSync > NTP_SYNC_INTERVAL) {
+    lastNtpSync = currentMillis;
+    if (timeClient.update()) {
+      setTime(timeClient.getEpochTime());
+      addLog("NTP resync OK: " + getEpochStringByParams(CE.toLocal(now())));
+    } else {
+      addLog("NTP resync failed");
+    }
+  }
+
+  return true;
 }
 
  
